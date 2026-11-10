@@ -300,6 +300,27 @@ export function buildAccountNameMap(accounts) {
 }
 
 /**
+ * 「最近请求」表里模型格的显示文本：`provider/model`。
+ *
+ * ⚠️ 用户 2026-11-11 要求「模型显示应该是 provider/模型名的格式，跟上游原来的一样」。
+ * 上游明细表原本只显示**裸模型 id**（`entry.model`），不是我们改坏的 ——
+ * 本函数是**新增**的展示口径。`TokenLedgerEntry.provider` 一直都在，故服务端零改动。
+ *
+ * ⚠️ 缺 provider 时**只回模型名**，不拼出 `undefined/model` 或 `/model` 这种脏串：
+ * 账本里的 `provider` 恒有值，但这条判据要挡住「字段被截断 / 旧数据」的形态。
+ *
+ * ⚠️ 本函数住在这里（而不是 `jet-hub.js`）是因为它是**纯取值口径**，且
+ * `jet-hub.js` 依赖 react、单测环境导入不了 —— 放在本文件才能被直接测。
+ */
+export function ledgerEntryModelText(entry) {
+  const model = typeof entry?.model === 'string' ? entry.model : '';
+  const provider = typeof entry?.provider === 'string' ? entry.provider : '';
+  if (model.length === 0) return '';
+  if (provider.length === 0) return model;
+  return provider + '/' + model;
+}
+
+/**
  * 汇总卡片头：渠道名 + 请求计数。
  *
  * 0 请求的渠道不显示卡片（空状态由调用方整体处理，见 `hasAnyData`）。
