@@ -169,6 +169,14 @@ export interface ResolverPool<TCredential = unknown> {
     provider: string,
     modelId: string,
     excludeAccountIds?: ReadonlySet<string>,
+    /**
+     * 「优先帐号」：本会话选中的账号 id（可选；用户 2026-11-10 需求）。
+     *
+     * ⚠️ 池实现只做**候选重排**（提到最前），**不改变候选集合** ——
+     * 它不可用时仍会正常选中别的号（用户要的正是「自动切到下一个」）。
+     * ⚠️ 未传 / 未实现时行为与改动前**逐字节相同**（本功能的唯一回归面）。
+     */
+    preferredAccountId?: string,
   ): Promise<{ entry: { id: string; credentialRef: string }; credential: TCredential } | null>
   /**
    * 按 `sessionId` 选号（可选能力；供 `accountSelection: 'session-balance'` 使用）。
@@ -199,6 +207,16 @@ export interface ResolverPool<TCredential = unknown> {
    * 与单测 stub 不该因为「这个可选方法不存在」而被动获得新行为。
    */
   strictManualOrder?(provider: string): boolean
+  /**
+   * 「优先帐号」（可选能力；真实 `AccountPool` 已实现）。
+   *
+   * 返回**本会话**选中的账号 id；`undefined` = 走默认策略。
+   *
+   * ⚠️ **未实现时行为必须与改动前逐字节一致** —— 这是本功能的**唯一回归面**：
+   * 大量单测用的是结构化替身池，它们不认识本方法，此时所有选号必须保持原样。
+   * 故调用点一律写成 `deps.pool.preferredAccountFor?.(…)`，不写 `if (… !== undefined)`。
+   */
+  preferredAccountFor?(provider: string, sessionId: string | undefined): string | undefined
 }
 
 /** 注入的共享设施。 */
@@ -442,6 +460,67 @@ function candidatesOf(
 }
 
 /**
+ * 「优先帐号」的**候选重排**（唯一实现）。
+ *
+ * ## 语义（用户 2026-11-10 需求）
+ *
+ * 用户在面板里选了「帐号 n」后，该会话的请求**优先**用这个账号发；
+ * 它不可用时按既有策略切到下一个。
+ *
+ * ## ⚠️⚠️ 「优先」只在**同档内**前移，绝不越过档位
+ *
+ * 若实现成「无条件提到第 0 位」，会让「有临期积分」的号闲置、先去烧
+ * 「只有永久积分」的号 —— 与既有的「临期优先」设计直接冲突，且用户从账面上
+ * 看不出为什么少了一截。
+ *
+ * 故本函数只做一件事：**把被选账号移到它所属档位的最前面**。
+ *
+ * ```
+ * 原：[t1-A, t1-B, t1-C, t2-D, t2-E]   选 t2-E
+ * 后：[t1-A, t1-B, t1-C, t2-E, t2-D]   ← t1 仍全在前
+ * ```
+ *
+ * ## ⚠️ 三条不变量（单测逐条锁死）
+ *
+ * 1. **集合不变**：只重排，不增删任何元素（`输出长度 === 输入长度` 且元素同一）；
+ * 2. **找不到就原样**：`preferredId` 不在候选里（账号被删/停用/被限流过滤掉）⇒ 行为
+ *    与未选时**逐字节相同**，不报错、不静默换成别的号；
+ * 3. **不传 tierOf ⇒ 等价于提到最前**：无余额分档的 provider（codearts / cline /
+ *    qoder 之外的纯手动序渠道）全池同档，此时「档内最前」就是「最前」。
+ *
+ * @param candidates - 已按 enabled / 封禁 / 限流过滤过的候选（顺序即手动优先级）
+ * @param preferredId - 用户选中的账号 id；`undefined` = 默认策略
+ * @param tierOf - 返回该候选的档位（越小越优先）；省略 = 全池同档
+ * @returns **新数组**（不修改入参）
+ */
+export function applyPreferredAccount<T extends { id: string }>(
+  candidates: readonly T[],
+  preferredId: string | undefined,
+  tierOf?: (candidate: T) => number,
+): T[] {
+  const copy = [...candidates]
+  // 不变量 2：没选 / 空串 ⇒ 原样（绝大多数请求走这条）。
+  if (preferredId === undefined || preferredId.length === 0) return copy
+  const index = copy.findIndex((c) => c.id === preferredId)
+  // 不变量 2：找不到 / 已在首位 ⇒ 原样（已在首位时无需搬动，省一次数组重建）。
+  if (index <= 0) return copy
+  const picked = copy[index]!
+  const pickedTier = tierOf === undefined ? 0 : tierOf(picked)
+  // 该档（含 picked）的第一个位置。`tierOf` 省略时恒 0 ⇒ 必然是 0 ⇒ 提到最前。
+  const firstOfTier = tierOf === undefined
+    ? 0
+    : copy.findIndex((c) => tierOf(c) === pickedTier)
+  // ⚠️ `firstOfTier` 理论上恒 ≥ 0（picked 自己就在档内），但防御式处理：
+  //    脏 `tierOf`（返回 NaN 等）时退化为「不搬动」，绝不产生 undefined 位次。
+  if (!Number.isFinite(firstOfTier) || firstOfTier < 0) return copy
+  const rest = copy.filter((_, i) => i !== index)
+  // 移除 picked 后，原 `firstOfTier` 可能越界（picked 就在该位置时）。
+  const insertAt = Math.min(firstOfTier, rest.length)
+  rest.splice(insertAt, 0, picked)
+  return rest
+}
+
+/**
  * 造一个与适配器契约一致的 `resolveCredential`。
  *
  * @param modelId - 本次请求的模型 id；⚠️ 会被透传给 `getAvailableAccount`
@@ -488,6 +567,26 @@ export function createCredentialResolver<TCredential>(
       // ⚠️ 字段现为**必填**（`NO_FREE_MODEL` 是「本家无免费模型」的显式表态），
       //    故不再需要 `=== undefined` 兜底 —— 那种兜底正是 Qoder 漏接三周的遮掩。
       const free = await plan.isFreeModel(modelId)
+      /**
+       * 「优先帐号」：本会话选中的号在**同档内前移**（用户 2026-11-10 需求）。
+       *
+       * ⚠️⚠️ **余额是在 `pickBuddyAccount` 内部才查询的**，本层拿不到档位 ⇒
+       * 绝不能在这里自己分档（那会变成「第二份档位判据」，且必然算错）。
+       * 故这里**只读偏好、只做透传**，真正的前移由
+       * `rankBuddyAccountsByBalance` 在算出档位之后完成。
+       *
+       * 三条判据：
+       * 1. **免费模型不重排** —— 免费路径（下面 ①）压根不看档位，它按候选顺序
+       *    只挑「凭据能读出来」的第一个；在那里插优先级会与它的既有语义冲突；
+       * 2. **`strictManualOrder` 开启时不重排** —— 用户已选「完全按拖拽序」，
+       *    再叠加会让两个开关互相覆盖。**互斥判据只在这一处**；
+       * 3. **未实现 `preferredAccountFor`（单测替身）⇒ `undefined`** ⇒ 行为与改动前
+       *    逐字节相同（这是本功能的唯一回归面）。
+       */
+      const strictOrder = deps.pool.strictManualOrder?.(providerId) === true
+      const preferredId = strictOrder || free === true
+        ? undefined
+        : deps.pool.preferredAccountFor?.(providerId, sessionId)
       const candidates = candidatesOf(deps.pool, providerId, modelId)
 
       // ① 免费模型（消耗 0 积分）不受「锁定永久积分」约束：锁定要保护的是
@@ -521,6 +620,8 @@ export function createCredentialResolver<TCredential>(
         // ⚠️ **每次现读**（面板可随时切换），且**未实现时视为关闭** ——
         //    单测替身与结构化 stub 不实现它时必须走既有语义（`=== true` 判据）。
         strictManualOrder: deps.pool.strictManualOrder?.(providerId) === true,
+        // 「优先帐号」透传（`undefined` ⇒ 与改动前逐字节同语义）。
+        ...(preferredId === undefined ? {} : { preferredAccountId: preferredId }),
       })
       if (picked.kind === 'account') {
         if (plan.reportPickedAccount !== false) report(picked.account.id)
@@ -563,11 +664,24 @@ export function createCredentialResolver<TCredential>(
     } else if (plan?.kind === 'loomy') {
       const candidates = candidatesOf(deps.pool, providerId, modelId)
       const allowPermanent = !deps.pool.permanentLocked(providerId)
-      if (candidates.length > 0) {
-        const picked = await plan.selector.select(candidates, {
+      /**
+       * 「优先帐号」：与 buddy 分支**同一份判据**（`strictManualOrder` 开启时不重排）。
+       *
+       * ⚠️ loomy 的本期支持范围：**只读偏好、不实现同档内前移** ——
+       * 它的分档语义（`dailyBalance`）与 buddy 的（`expiring/permanent`）不同，
+       * `rankLoomyAccountsByBalance` 没有 `preferredAccountId` 入口。
+       *
+       * ⚠️ 这里**刻意不假装支持**：读出来但不传下去，等于「下拉框选了没效果」，
+       * 那正是本方案 §坑 1 点名要避免的静默失效。故 UI 侧对 loomy **不渲染**
+       * 该下拉框（见 `usage-badge.js` 的 `SUPPORTS_PREFERRED_ACCOUNT` 白名单）。
+       */
+      const picked = candidates.length > 0
+        ? await plan.selector.select(candidates, {
           allowPermanent,
           ...(deps.pool.strictManualOrder?.(providerId) === true ? { strictManualOrder: true } : {}),
         })
+        : undefined
+      if (picked !== undefined) {
         if (picked.ok) {
           const credential = await config.readCredential(picked.account.credentialRef)
           // ⚠️ 凭据不可用**不换号**（与 buddy 协议的关键差异）：loomy 的分档
@@ -600,11 +714,24 @@ export function createCredentialResolver<TCredential>(
     const poolSwitch = typeof deps.pool.sessionBalanceEnabled === 'function'
       ? deps.pool.sessionBalanceEnabled()
       : sessionBalanceEnabled()
+    /**
+     * 「优先帐号」（机制③：纯手动顺序的渠道，如 codearts / cline / qoder 之外的那些）。
+     *
+     * ⚠️ 这条路径**没有余额分档**（`getAvailableAccount` 只按 `enabled` / 封禁 /
+     * 限流过滤 + 保持数组顺序）⇒ 全池同档 ⇒ 「优先帐号」等价于「提到候选最前」。
+     *
+     * ⚠️ `session-balance`（zcode 会话亲和）**刻意不支持**：那套用 rendezvous
+     * 哈希把会话稳定映射到账号，优先级由哈希决定；插一个「优先帐号」会让
+     * 同一批会话的计算结果互相干扰。UI 侧同样不渲染（见白名单）。
+     */
+    const poolPreferredId = config.accountSelection === 'session-balance'
+      ? undefined
+      : deps.pool.preferredAccountFor?.(providerId, sessionId)
     const available = config.accountSelection === 'session-balance'
       && poolSwitch
       && deps.pool.getAvailableAccountForSession !== undefined
       ? await deps.pool.getAvailableAccountForSession(providerId, modelId ?? '', sessionId, tried)
-      : await deps.pool.getAvailableAccount(providerId, modelId ?? '', tried)
+      : await deps.pool.getAvailableAccount(providerId, modelId ?? '', tried, poolPreferredId)
     // ④ 回报「池的决策结果」——**未命中时也报 `undefined`**（见 `reportAccount` 契约）。
     report(available?.entry.id ?? undefined)
     /**

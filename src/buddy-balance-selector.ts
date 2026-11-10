@@ -692,6 +692,17 @@ export async function pickBuddyAccount<TCredential = BuddyCredential>(
      * 共用一条通道 —— 将来谁给 `tierOptions` 换形状都会连带改掉选号策略。
      */
     strictManualOrder?: boolean
+    /**
+     * 「优先帐号」：本会话选中的账号 id（用户 2026-11-10 需求）。
+     *
+     * 语义与 {@link BuddyTierOptions.preferredAccountId} **逐字相同**（本字段只是
+     * 把它从 resolver 透传到 `selector.select()` 的通道）。判据仍只有一处：
+     * `rankBuddyAccountsByBalance` 里的「同档内前移」。
+     *
+     * ⚠️ 与 `strictManualOrder === true` 互斥 —— 但**互斥判据在调用方**
+     * （`credential-resolver`），本函数只做透传。这里再判一次会形成「两处判据」。
+     */
+    preferredAccountId?: string
   },
 ): Promise<
   | {
@@ -735,6 +746,13 @@ export async function pickBuddyAccount<TCredential = BuddyCredential>(
         // ⚠️ 每次迭代都带上：降级分支会把 `allowPermanent` 翻真，而本项与它无关，
         //    不能因为走了降级就把「严格手动顺序」丢掉（那会让用户开了开关却偶发失效）。
         ...(options.strictManualOrder === true ? { strictManualOrder: true } : {}),
+        // 「优先帐号」：只在**非严格手动顺序**时生效（两者互斥，判据只在
+        // `credential-resolver` 一处，见其 `preferredId` 的注释）。
+        // ⚠️ 同样每次迭代都带上：降级会把 `allowPermanent` 翻真、从而改变档位划分，
+        //    但「用户想优先用哪个号」这个意图与锁定态无关，丢掉会让开关偶发失效。
+        ...(options.strictManualOrder === true || options.preferredAccountId === undefined
+          ? {}
+          : { preferredAccountId: options.preferredAccountId }),
       },
     )
     if (!picked.ok) {

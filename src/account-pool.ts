@@ -2,8 +2,8 @@ import { Context } from '@deepseek-ai/cordis'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import type { BuddyCredential } from './buddy.js'
 import type { BuddyProduct } from './product.js'
-import { createJetHubStore, clearRejectionLayer, DEFAULT_PANEL_ENTRY, isValidResetAtMs, MAX_DATE_MS, mergeLegacyLoomyLock, sanitizeAccounts, sanitizeAggregateAllowed, sanitizeAggregateOrder, sanitizeAggregateOrderMode, sanitizeAggregateRejections, sanitizeDisabledModels, sanitizeMinimaxXff, sanitizePanelEntry, sanitizePermanentLocks, sanitizeProviderClosed, sanitizeStrictManualOrder, withAllowed, withoutAllowed } from './jet-hub-store.js'
-import type { AggregateAllowedMap, AggregateOrderMap, AggregateOrderMode, AggregateRejectionMap, JetHubStore, JetHubState, ModelDisableMap, PanelEntry, PermanentLockMap, ProviderClosedMap, StrictManualOrderMap } from './jet-hub-store.js'
+import { createJetHubStore, clearRejectionLayer, DEFAULT_PANEL_ENTRY, isValidResetAtMs, MAX_DATE_MS, mergeLegacyLoomyLock, sanitizeAccounts, sanitizeAggregateAllowed, sanitizeAggregateOrder, sanitizeAggregateOrderMode, sanitizeAggregateRejections, sanitizeDisabledModels, sanitizeMinimaxXff, sanitizePanelEntry, sanitizePermanentLocks, sanitizePreferredAccounts, sanitizeProviderClosed, sanitizeStrictManualOrder, withAllowed, withoutAllowed } from './jet-hub-store.js'
+import type { AggregateAllowedMap, AggregateOrderMap, AggregateOrderMode, AggregateRejectionMap, JetHubStore, JetHubState, ModelDisableMap, PanelEntry, PermanentLockMap, PreferredAccountMap, ProviderClosedMap, StrictManualOrderMap } from './jet-hub-store.js'
 import { createPermanentLockStore } from './permanent-lock-store.js'
 import type { PermanentLockRead, PermanentLockStore } from './permanent-lock-store.js'
 import { normalizeOpencodeGeneration } from './opencode-auth.js'
@@ -307,6 +307,45 @@ export function isPolicyBlockedAccount(
   return isValidResetAtMs(entry.policyBlockedAtMs)
 }
 
+/**
+ * 「优先帐号」的候选重排（池这一层的**唯一**实现）。
+ *
+ * 语义：把用户选中的账号提到**最前**；其余保持原相对顺序。
+ *
+ * ## ⚠️ 为什么这里可以直接「提到最前」（与 buddy 的「同档内前移」不同）
+ *
+ * 本函数只服务于**无余额分档**的路径（`getAvailableAccount`：按 `enabled` /
+ * 封禁 / 限流过滤后即保持手动顺序）⇒ 全池同档 ⇒「档内最前」就是「最前」。
+ * 有分档的渠道走 `buddy-balance-selector` / `loomy-balance-selector`，
+ * 它们在**算出档位之后**才前移 —— 那才是正确的位置（在这里前移会因为
+ * 「档位还没算」而让只有永久积分的号越过有临期积分的号）。
+ *
+ * ## 三条不变量（单测逐条锁死）
+ *
+ * 1. **集合不变**：只重排，不增删（长度与元素身份都不变）；
+ * 2. **找不到 / 已在首位 ⇒ 原样**（仍是新数组，但顺序不变）；
+ * 3. **不做存在性校验**：账号临时停用一下不该静默清掉用户的偏好
+ *   （见 `preferredAccountFor` 的注释）。
+ *
+ * @param candidates - 已过滤的候选（顺序即手动优先级）
+ * @param preferredAccountId - 用户选中的账号 id；`undefined` = 默认策略
+ * @returns **新数组**（不修改入参）
+ */
+export function orderByPreferredAccount<T extends { id: string }>(
+  candidates: readonly T[],
+  preferredAccountId: string | undefined,
+): T[] {
+  const copy = [...candidates]
+  // 不变量 2：没选 / 空串 ⇒ 原样（绝大多数请求走这条）。
+  if (preferredAccountId === undefined || preferredAccountId.length === 0) return copy
+  const index = copy.findIndex((c) => c.id === preferredAccountId)
+  // 不变量 2：找不到 / 已在首位 ⇒ 原样。
+  if (index <= 0) return copy
+  const [picked] = copy.splice(index, 1)
+  if (picked !== undefined) copy.unshift(picked)
+  return copy
+}
+
 export class AccountPool {
   /** 持久化后端；两个后端都不可用时是仅内存实现。 */
   private readonly store: JetHubStore
@@ -433,6 +472,7 @@ export class AccountPool {
    * 「用户仍需要显式开一次开关」，那是可见、可逆的。
    */
   private strictManualOrderCache: StrictManualOrderMap = {}
+  private preferredAccountCache: PreferredAccountMap = {}
   /**
    * 「面板入口」的进程内副本：Jet Hub 的唯一入口位置（两个取值互斥）。
    *
@@ -590,6 +630,7 @@ export class AccountPool {
       // 严格手动顺序同理：老文档没有该键 → 空表（= 全部走余额分档，与升级前一致）。
       // 过一遍 sanitize：老契约后端可能绕过 schema 直接给出原始文档。
       this.strictManualOrderCache = sanitizeStrictManualOrder(state.strictManualOrder)
+          this.preferredAccountCache = sanitizePreferredAccounts(state.preferredAccount)
     }
     this.loadLocks(state)
   }
@@ -693,6 +734,7 @@ export class AccountPool {
         //    漏键 ⇒ 用户开过的「严格手动顺序」在**任何**一次其它写入时被抹掉，
         //    重启后静默回到余额分档优先（用户只看到「拖拽又不灵了」）。
         strictManualOrder: this.strictManualOrderCache,
+            preferredAccount: this.preferredAccountCache,
         // ⚠️ **必须带上本键**（与 `nativeWebSearchEnabled` 同一个整体替换陷阱）：
         //    漏键会让用户改过的面板入口在**任何**一次账号/黑名单/网关/顺序写入时
         //    被静默清掉，重启后入口又变回默认「仅侧栏」。
@@ -1286,6 +1328,76 @@ export class AccountPool {
       return
     }
     await this.queueStoreSave()
+  }
+
+  /**
+   * 「优先帐号」：某 provider 在某**会话**下选中的账号 id（`undefined` = 默认策略）。
+   *
+   * ## 语义
+   *
+   * 只影响**同档内**的先后（见 `credential-resolver.ts` 的 `applyPreferredAccount`），
+   * 不会让「只有永久积分」的号越过「有临期积分」的号。
+   *
+   * ## ⚠️ 三条判据
+   *
+   * 1. **必须传 sessionId**：会话为空串时**恒返回 `undefined`** —— 空串会让
+   *    「默认」与「某会话」撞成同一个键，两者语义不同（见 `PreferredAccountMap`）。
+   * 2. **每次现读，不缓存**：用户在面板上随时可能切换。
+   * 3. **返回的 id 可能已失效**（账号被删/停用）：本方法**不做存在性校验** ——
+   *    那是消费方的事（`applyPreferredAccount` 找不到该 id 时原样返回），
+   *    在这里过滤会让「账号临时停用一下」静默清掉用户的偏好。
+   */
+  preferredAccountFor(provider: string, sessionId: string | undefined): string | undefined {
+    this.ensureLoaded()
+    if (provider.length === 0) return undefined
+    if (typeof sessionId !== 'string' || sessionId.length === 0) return undefined
+    return this.preferredAccountCache[provider]?.[sessionId]?.accountId
+  }
+
+  /**
+   * 写入「优先帐号」并落盘；`accountId` 传 `null` = 恢复默认策略。
+   *
+   * ⚠️ 与 {@link setStrictManualOrder} 同款：走同一条写队列（`queueStoreSave`），
+   * 不能自己 `store.save(...)` —— 那会与账号/黑名单的写入乱序覆盖。
+   *
+   * ⚠️ **稀疏表**：`null` 时**删键**（整层空了连 provider 层一起删），
+   * 与 `sanitizePreferredAccounts`「空层不保留」对称 —— 否则文档里会留下
+   * 一堆永不消费的空对象。
+   */
+  async setPreferredAccount(
+    provider: string,
+    sessionId: string,
+    accountId: string | null,
+  ): Promise<void> {
+    this.ensureLoaded()
+    if (provider.length === 0 || sessionId.length === 0) return
+    const current = this.preferredAccountCache[provider]?.[sessionId]?.accountId
+    if ((accountId ?? undefined) === current) return
+    const next: PreferredAccountMap = { ...this.preferredAccountCache }
+    const sessions = { ...(next[provider] ?? {}) }
+    if (accountId === null || accountId.length === 0) delete sessions[sessionId]
+    else sessions[sessionId] = { accountId, at: Date.now() }
+    if (Object.keys(sessions).length > 0) next[provider] = sessions
+    else delete next[provider]
+    // ⚠️ 写入时同样过一遍 sanitize：它会顺手按 `at` 淘汰旧会话（`PREFERRED_ACCOUNT_MAX_SESSIONS`）。
+    this.preferredAccountCache = sanitizePreferredAccounts(next)
+    this.loaded = true
+    if (this.store.kind === 'memory') {
+      this.ctx.logger?.warn?.('[jet-hub] 无持久化后端，优先帐号选择仅本次会话有效')
+      return
+    }
+    await this.queueStoreSave()
+  }
+
+  /**
+   * 某 provider 在某会话下的**全部**偏好快照（供 RPC 组装下拉框）。
+   *
+   * 返回 `{ selected, sessions }`：`selected` 是当前会话的选择（可能已失效），
+   * `sessions` 是原样副本（调用方据此判淘汰/统计，**不要**直接改它）。
+   */
+  preferredAccountsOf(provider: string): Readonly<Record<string, { accountId: string; at: number }>> {
+    this.ensureLoaded()
+    return { ...(this.preferredAccountCache[provider] ?? {}) }
   }
 
   /**
@@ -2634,8 +2746,19 @@ export class AccountPool {
     provider: string,
     modelId: string,
     excludeAccountIds?: ReadonlySet<string>,
+    /**
+     * 「优先帐号」：本会话选中的账号 id（用户 2026-11-10 需求）。
+     *
+     * ⚠️ 只做**候选重排**（提到最前），不增删元素、不改变过滤判据 ⇒
+     * 它不可用（被停用/封禁/限流）时仍会正常选中别的号（池的 `tried` 循环照旧）。
+     * ⚠️ `undefined` ⇒ 行为与改动前**逐字节相同**。
+     */
+    preferredAccountId?: string,
   ): Promise<{ entry: ProviderAccountEntry; credential: TCredential } | null> {
-    const candidates = this.candidateAccounts(provider, modelId, excludeAccountIds)
+    const candidates = orderByPreferredAccount(
+      this.candidateAccounts(provider, modelId, excludeAccountIds),
+      preferredAccountId,
+    )
     if (candidates.length === 0) return null
     // 候选顺序即**用户在 Jet Hub 拖拽设定的手动顺序**（`reorderAccounts` 写入）。
     //

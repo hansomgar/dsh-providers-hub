@@ -352,6 +352,21 @@ export interface BuddyTierOptions {
    * 选择上 —— 故传 `true` 时「锁定永久积分」这道门照旧生效。
    */
   strictManualOrder?: boolean
+  /**
+   * 「优先帐号」：本会话选中的账号 id（用户 2026-11-10 需求）。
+   *
+   * 语义：**在该账号所属档位内**把它提到最前，其余保持原相对顺序。
+   * 它不可用时由既有循环自然切到下一个。
+   *
+   * ⚠️ **绝不越过档位** —— 若实现成「无条件提到第 0 位」，会让「有临期积分」的号
+   * 闲置、先去烧「只有永久积分」的号，与 {@link buddyBalanceTier} 的「临期优先」
+   * 设计直接冲突，且用户从账面上看不出为什么少了一截。
+   *
+   * ⚠️ 与 `strictManualOrder === true` **互斥**：那种模式下先后完全由拖拽序决定，
+   * 本项被调用方（`credential-resolver`）主动置 `undefined`，不在这里判 ——
+   * 让「两个开关叠加时谁赢」只有**一处**判据。
+   */
+  preferredAccountId?: string
 }
 
 /**
@@ -415,10 +430,48 @@ export function rankBuddyAccountsByBalance<T extends BuddyAccountBalance>(
   accounts: readonly T[],
   options: BuddyTierOptions = {},
 ): T[] {
-  return accounts
+  const sorted = accounts
     .map((account, index) => ({ account, index, tier: buddyBalanceTier(account, options) }))
     .sort((a, b) => (a.tier - b.tier) || (a.index - b.index))
     .map((entry) => entry.account)
+  return applyPreferredWithinTier(sorted, options.preferredAccountId, options)
+}
+
+/**
+ * 「优先帐号」在**已分档排序**的数组上就位：把它挪到**它所属档位的最前面**。
+ *
+ * ## 为什么单独成一个函数（而不是塞进 sort 比较器里）
+ *
+ * 比较器必须满足严格弱序，而「某元素永远排第一」在比较器里表达出来会破坏
+ * 传递性（A 优先于全体、但 B 与 C 之间又按别的规则），排序结果将**依赖引擎实现**。
+ * 装饰-排序-后处理 是唯一可预测的写法。
+ *
+ * ## 三条不变量（与 `credential-resolver.applyPreferredAccount` 逐条对应）
+ *
+ * 1. **集合不变**：只重排，不增删；
+ * 2. **找不到 / 已在档内首位 ⇒ 原样**（不报错，也不换成别的号）；
+ * 3. **不越过档位**：插入位置 = 「该档第一个元素」的位置。
+ *
+ * ⚠️ 与 `strictManualOrder === true` 的路径**无关**：那条走
+ * {@link rankBuddyAccountsByManualOrder}，不经过本函数。
+ */
+function applyPreferredWithinTier<T extends BuddyAccountBalance>(
+  ranked: readonly T[],
+  preferredId: string | undefined,
+  options: BuddyTierOptions,
+): T[] {
+  if (preferredId === undefined || preferredId.length === 0) return [...ranked]
+  const index = ranked.findIndex((account) => account.id === preferredId)
+  if (index <= 0) return [...ranked]
+  const picked = ranked[index]!
+  const pickedTier = buddyBalanceTier(picked, options)
+  // 该档（含 picked）的最前位置。picked 自己就在档内 ⇒ 恒 ≥ 0。
+  const firstOfTier = ranked.findIndex((account) => buddyBalanceTier(account, options) === pickedTier)
+  if (firstOfTier < 0 || firstOfTier === index) return [...ranked]
+  const rest = ranked.filter((_, i) => i !== index)
+  const insertAt = Math.min(firstOfTier, rest.length)
+  rest.splice(insertAt, 0, picked)
+  return rest
 }
 
 /**

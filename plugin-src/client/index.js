@@ -244,6 +244,15 @@ export function apply(ctx) {
         };
       },
       providerLabel,
+      /**
+       * 当前**会话** id —— 「优先帐号」的作用域键（用户 2026-11-10 需求）。
+       *
+       * ⚠️⚠️ **必须用宿主给的这一个**：宿主 dispatch 时会把同一个 id 作为
+       * `GenerateOptions.sessionId` 传给适配器，而选号层正是按它查偏好。
+       * 插件自己 `crypto.randomUUID()` 编一个 ⇒ 键对不上 ⇒ **选了永远不生效且零报错**
+       * （方案 §坑 1，本功能最易踩的坑）。
+       */
+      sessionId,
       readBadge: (provider, options) => rpcCall('usage.badge', { provider, ...options }),
       /**
        * 聚合 provider「上次**实际**转发成功的渠道」（P3）。
@@ -260,6 +269,17 @@ export function apply(ctx) {
       //    本仓库把死代码视为缺陷（会让人以为「面板是通过 prop 取数的」而找错地方）。
       //    ⚠️ 端点本身仍在（`aggregate.expiryOrder`）—— 删的只是这个没人用的转发 prop。
       writePreference: (preference) => rpcCall('usage.badgePreference', { preference }),
+      /**
+       * 「优先帐号」读取（用户 2026-11-10 需求）。
+       *
+       * ⚠️ `sessionId` 由调用方从**当前 DSH 会话**取后传入 —— 插件自己编的 id
+       * 与宿主 dispatch 时给适配器的不一致，会让功能**静默失效**（方案 §坑 1）。
+       */
+      readPreferredAccount: (provider, sessionId) =>
+        rpcCall('account.getPreferred', { provider, sessionId }),
+      /** 「优先帐号」写入；`accountId === null` = 恢复默认策略。 */
+      writePreferredAccount: (provider, sessionId, accountId) =>
+        rpcCall('account.setPreferred', { provider, sessionId, accountId }),
       // 自动签到开关（全局一个，不分渠道）：宿主在「打开」时会立刻跑一轮。
       setAutoCheckin: (enabled) => rpcCall('usage.autoCheckin', { enabled }),
       // 关闭那行**常驻**的自动签到状态文字（只关当前这一轮，下一轮会重新出现）。

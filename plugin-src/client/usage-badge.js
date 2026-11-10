@@ -256,6 +256,33 @@ export const CLAIM_NOTICE_WARN_MS = 20_000;
 export const CREDITS_COLLAPSED_LIMIT = 5;
 
 /**
+ * 「优先帐号」下拉框的支持范围（用户 2026-11-10 需求）。
+ *
+ * ⚠️⚠️ **这是一张显式白名单，不是「全部渠道」** —— 每条都有实现依据：
+ *
+ * | 渠道 | 接入的选号路径 | 语义 |
+ * |---|---|---|
+ * | `buddy` / `workbuddy` / `qoder` / `qodercn` / `trae` / `minimax` / `minimaxintl` / `autoclaw` / `autoclawintl` / `magicrew` / `magicrewintl` / `astudio` / `lobsterai` | 余额分档（`rankBuddyAccountsByBalance`） | **同档内**前移 |
+ * | `codearts` / `cline` / `opencode` / `gemini` / `officeace` / `accio` / `modelscope` / `qiniu` / `codely` / `monkeycode` / `monkeycodeintl` / `baizhi` / `marvis` / `raccoon` | 池选号（`orderByPreferredAccount`） | **提到最前**（全池同档） |
+ *
+ * **刻意排除**（选了会**静默失效**，正是本方案 §坑 1 要避免的形态）：
+ * - `loomy`：分档语义是 `dailyBalance`，`rankLoomyAccountsByBalance` 没有该入口；
+ * - `zcode`：选号走 rendezvous 会话亲和，优先级由哈希决定；
+ * - `aggregate`：虚拟 provider，本身不选号（按上游渠道轮换）。
+ *
+ * ⚠️ 新增渠道时**必须**同时确认选号层真的接了这一项 —— 只加白名单不接实现
+ * 会让用户「选了没反应」，比不渲染更糟。
+ */
+const PREFERRED_ACCOUNT_EXCLUDED = Object.freeze(['loomy', 'zcode', 'aggregate']);
+
+/** 该渠道是否支持「优先帐号」下拉框。 */
+export function supportsPreferredAccount(provider) {
+  return typeof provider === 'string'
+    && provider.length > 0
+    && !PREFERRED_ACCOUNT_EXCLUDED.includes(provider);
+}
+
+/**
  * 目录解析失败后的重试退避（毫秒）。
  *
  * ⚠️ 覆盖「宿主在该槽位注入期还没接上 `remote.session`」这一实际情形
@@ -596,6 +623,7 @@ export function UsageBadge(props) {
  */
 function UsageBadgeActive(props) {
   const { provider, providerLabel, readBadge, writePreference, setAutoCheckin, dismissAutoCheckin, claimCredits } = props;
+  const { sessionId, readPreferredAccount, writePreferredAccount } = props;
   const label = providerLabel(provider);
 
   /** `{ value, at }`：宿主返回的读数 + **到达**本地的时刻（兜底显示用）。 */
@@ -615,6 +643,18 @@ function UsageBadgeActive(props) {
   /** 本地偏好镜像：写入后立刻生效，不等待下一轮轮询（否则像「点了没反应」）。 */
   const [preference, setPreference] = React.useState(null);
   const [prefError, setPrefError] = React.useState('');
+  /**
+   * 「优先帐号」的会话级选择（用户 2026-11-10 需求）。
+   *
+   * `null` 或 undefined = 默认策略（不干预选号）。
+   * ⚠️ 与上面那个 `preference` **完全不同**：那个改「显示什么数字」，
+   * 这个改「请求用哪个号发」。两者共用一个 state 会让语义彻底混淆。
+   */
+  const [preferredAccount, setPreferredAccount] = React.useState(null);
+  const [preferredAccounts, setPreferredAccounts] = React.useState(null);
+  const [prefAccountStale, setPrefAccountStale] = React.useState(false);
+  const [prefAccountError, setPrefAccountError] = React.useState('');
+  const [prefAccountBusy, setPrefAccountBusy] = React.useState(false);
   /** 自动签到开关的写入错误（与偏好分开：两者是不同的设置项，别互相顶掉）。 */
   const [autoError, setAutoError] = React.useState('');
   /**
@@ -699,6 +739,17 @@ function UsageBadgeActive(props) {
     // 「展开其余 N 个」是**本渠道**的一次操作，换渠道即失效（理由见它的声明处）。
     setCreditsExpanded(false);
   }, [provider]);
+
+  /**
+   * 「优先帐号」的加载时机：**挂载 / 换渠道 / 换会话**时各读一次。
+   *
+   * ⚠️ 与上面那个 60s 轮询分开：偏好是**用户自己的选择**，不会在服务端被动变化
+   * （唯一变化源就是用户在这里点），故无需轮询 —— 轮询只会在写入后把刚选的值
+   * 用旧快照盖回去（竞态）。
+   */
+  React.useEffect(() => {
+    void loadPreferredAccount();
+  }, [loadPreferredAccount]);
 
   React.useEffect(() => {
     let alive = true;
@@ -936,6 +987,64 @@ function UsageBadgeActive(props) {
     } catch (error) {
       setPreference(null);
       setPrefError(describeBadgeError(error, '偏好保存失败'));
+    }
+  };
+
+  /**
+   * 「优先帐号」的读取（每次打开弹窗 + 切换渠道时重读）。
+   *
+   * ⚠️ 三条不可省的判断：
+   * 1. **`sessionId` 为空 ⇒ 不请求、不渲染** —— 宿主没给会话 id 时本功能不可能生效
+   *    （选号层按 sessionId 查偏好），此时渲染一个「选了没用」的下拉框比不渲染更糟。
+   * 2. **非白名单渠道 ⇒ 不请求** —— `SUPPORTS_PREFERRED_ACCOUNT` 之外的渠道
+   *    （loomy / zcode / aggregate）选号层没有接入，选了就是静默失效。
+   * 3. **失败要落到 `prefAccountError`**，不能只 `catch {}` —— 用户会以为
+   *    「这个渠道没有账号可选」，而真实原因是 RPC 不可用（例如宿主跑的是旧代码）。
+   */
+  const loadPreferredAccount = React.useCallback(async () => {
+    if (!supportsPreferredAccount(provider)) return;
+    if (typeof sessionId !== 'string' || sessionId.length === 0) return;
+    if (typeof readPreferredAccount !== 'function') return;
+    try {
+      const res = await readPreferredAccount(provider, sessionId);
+      const value = res?.value ?? res;
+      const list = Array.isArray(value?.accounts) ? value.accounts : [];
+      setPreferredAccounts(list);
+      setPreferredAccount(typeof value?.selected === 'string' ? value.selected : null);
+      setPrefAccountStale(value?.stale === true);
+      setPrefAccountError('');
+    } catch (error) {
+      setPreferredAccounts(null);
+      setPrefAccountError(describeBadgeError(error, '优先帐号读取失败'));
+    }
+  }, [provider, sessionId, readPreferredAccount]);
+
+  /**
+   * 「优先帐号」的写入。
+   *
+   * ⚠️ 不做乐观更新（与 `writePreference` 的取向一致）：写入失败要把界面**退回去**，
+   * 否则用户以为选好了、下一次发请求却没变化 —— 正是本仓库反复出现的
+   * 「显示与行为分叉」缺陷形态。
+   */
+  const onPickPreferredAccount = async (accountId) => {
+    if (typeof writePreferredAccount !== 'function') return;
+    if (typeof sessionId !== 'string' || sessionId.length === 0) return;
+    setPrefAccountBusy(true);
+    setPrefAccountError('');
+    const next = accountId === '' ? null : accountId;
+    try {
+      const res = await writePreferredAccount(provider, sessionId, next);
+      const value = res?.value ?? res;
+      setPreferredAccount(typeof value?.selected === 'string' ? value.selected : null);
+      setPrefAccountStale(false);
+      // 写后重读账号列表：位次可能因并发拖拽变化，且 `stale` 要按最新集合重判。
+      await loadPreferredAccount();
+    } catch (error) {
+      setPrefAccountError(describeBadgeError(error, '优先帐号保存失败'));
+      // 失败 ⇒ 重新读一次，让界面回到服务端的真实状态（而不是停在乐观值上）。
+      await loadPreferredAccount();
+    } finally {
+      setPrefAccountBusy(false);
     }
   };
 
@@ -1237,6 +1346,9 @@ function UsageBadgeActive(props) {
         ? null
         : React.createElement('div', { key: 'autoErr', className: 'dim-jh-badgeFail', role: 'alert' }, autoError),
       renderPreference(),
+      // 「优先帐号」独占下一行 —— 与上面的「显示偏好」语义完全不同
+      //（一个改显示、一个改选号），共用一行会让用户以为切了显示就换了号。
+      renderPreferredAccount(),
     ];
 
     // 首屏：读数未到 / 首次就失败 —— 说明白，但**不**渲染会说出
@@ -1324,6 +1436,59 @@ function UsageBadgeActive(props) {
    * 窗口/套餐；`subscription` 干脆不看余额。标签名因此必须让用户看出
    * 「只看积分」比「自动」更**强制**（旧名「优先积分」读起来像 auto 的同义词）。
    */
+  /**
+   * 「优先帐号」下拉框（用户 2026-11-10 需求）。
+   *
+   * ## ⚠️ 为什么必须与「显示偏好」分区
+   *
+   * 上面那三个按钮改的是**显示什么数字**，本下拉框改的是**请求用哪个号发**。
+   * 共用一行会让用户以为「切了显示就换了号」—— 而两者的作用范围毫无交集。
+   * 故这里自己带标签「优先帐号」并独占一行，不挤进偏好那三个按钮中间。
+   *
+   * ## 渲染条件（任一不满足即**整块不渲染**）
+   *
+   * - 渠道在 {@link supportsPreferredAccount} 白名单内（否则选了静默失效）；
+   * - 宿主给了 `sessionId`（否则选号层查不到这份偏好）；
+   * - 账号列表非空。
+   *
+   * ⚠️ **不渲染**优于「渲染但禁用」：禁用态会让人以为「以后会能用」，
+   * 而这些渠道是**设计上不支持**。
+   */
+  function renderPreferredAccount() {
+    if (!supportsPreferredAccount(provider)) return null;
+    if (typeof sessionId !== 'string' || sessionId.length === 0) return null;
+    if (!Array.isArray(preferredAccounts) || preferredAccounts.length === 0) return null;
+    const current = preferredAccount ?? '';
+    const options = [
+      React.createElement('option', { key: '__default__', value: '' }, '默认'),
+      ...preferredAccounts.map((account) => React.createElement('option', {
+        key: account.id,
+        value: account.id,
+        // ⚠️ 停用的号**不禁止选择**：用户可能就是想先指定、等它恢复后自动用上。
+        //    但要在文案里标注，否则「选了个停用的号」看起来像 bug。
+      }, `帐号 ${account.position} · ${account.nickname}${account.enabled === false ? '（已停用）' : ''}`)),
+    ];
+    return React.createElement('div', { key: 'prefAccount', className: 'dim-jh-badgePref dim-jh-badgePrefAccount' }, [
+      React.createElement('span', { key: 'l', className: 'dim-jh-badgePrefLabel' }, '优先帐号'),
+      React.createElement('select', {
+        key: 'sel',
+        className: 'dim-jh-badgeSelect',
+        value: current,
+        disabled: prefAccountBusy === true,
+        title: '本会话的请求优先用这个帐号发出；它不可用时自动按原有策略切到下一个。'
+          + '「默认」= 不干预（沿用余额分档 / 手动顺序）。',
+        onChange: (event) => { void onPickPreferredAccount(event.target.value); },
+      }, options),
+      // 选中的号已失效（被删）⇒ 必须明说，否则下拉框会显示成「默认」而用户以为自己没选过。
+      prefAccountStale
+        ? React.createElement('span', { key: 'stale', className: 'dim-jh-badgeFail' }, '已失效，请重选')
+        : null,
+      prefAccountError === ''
+        ? null
+        : React.createElement('span', { key: 'err', className: 'dim-jh-badgeFail' }, prefAccountError),
+    ]);
+  }
+
   function renderPreference() {
     return React.createElement('div', {
       key: 'pref',

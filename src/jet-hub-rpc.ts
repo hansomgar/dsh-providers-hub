@@ -7372,6 +7372,92 @@ function registerJetHubEndpoints(
 
       // 拖拽排序：重写该 provider 账号在池中的顺序。
       // 该顺序是自动选号与限流换号的候选优先级，因此不是纯 UI 操作。
+        /**
+         * 「优先帐号」读取（用户 2026-11-10 需求）。
+         *
+         * 返回**当前会话**选中的账号 + 该 provider 的全部账号（带 position 位次）。
+         * 客户端据此渲染下拉框：默认 / 帐号 1 · 昵称 / 帐号 2 · 昵称 …。
+         *
+         * ⚠️ **position 是现算的排序位次**（1-based），不是持久化数据 ——
+         * 用户拖拽重排后位次会变，而选择本身按 ccountId 走，不受影响。
+         * ⚠️ selected 可能指向一个**已失效**的账号（被删/停用）⇒ 同时回 stale:true，
+         * 让客户端显示「已失效」而不是静默当成默认。
+         */
+        case 'account.getPreferred': {
+          const req = payload as { provider?: unknown, sessionId?: unknown }
+          if (typeof req.provider !== 'string' || req.provider.length === 0) {
+            return { ok: false, error: { code: 'bad-request', message: 'provider 必填' } }
+          }
+          if (typeof req.sessionId !== 'string' || req.sessionId.length === 0) {
+            return { ok: false, error: { code: 'bad-request', message: 'sessionId 必填（本功能只在会话内可用）' } }
+          }
+          const accounts = await pool.listAllAccounts()
+          const mine = accounts.filter((a) => a.provider === req.provider)
+          const selected = pool.preferredAccountFor(req.provider, req.sessionId) ?? null
+          return {
+            ok: true,
+            value: {
+              selected,
+              // 选中的 id 不在**全部**账号里 ⇒ 已失效（停用的仍算存在：listAllAccounts 含停用）。
+              stale: selected !== null && !mine.some((a) => a.id === selected),
+              accounts: mine.map((a, i) => ({
+                id: a.id,
+                nickname: a.nickname ?? a.id,
+                // ⚠️ 位次按 listAllAccounts 的**当前顺序**现算（含停用账号，
+                //    因为用户看到的下拉框就是全量列表）。
+                position: i + 1,
+                enabled: a.enabled !== false,
+              })),
+            },
+          }
+        }
+
+        /**
+         * 「优先帐号」写入；ccountId: null = 恢复默认策略。
+         *
+         * ⚠️ 回传**落盘后重读的值**（与 gateway.setEnabled 同取向，不做乐观更新）。
+         */
+        case 'account.setPreferred': {
+          const req = payload as { provider?: unknown, sessionId?: unknown, accountId?: unknown }
+          if (typeof req.provider !== 'string' || req.provider.length === 0) {
+            return { ok: false, error: { code: 'bad-request', message: 'provider 必填' } }
+          }
+          if (typeof req.sessionId !== 'string' || req.sessionId.length === 0) {
+            return { ok: false, error: { code: 'bad-request', message: 'sessionId 必填' } }
+          }
+          if (req.accountId !== null && (typeof req.accountId !== 'string' || req.accountId.length === 0)) {
+            return { ok: false, error: { code: 'bad-request', message: 'accountId 必须是账号 id 或 null' } }
+          }
+          // ⚠️ 写入前校验该 id 确实属于本 provider：否则用户会得到一个
+          //    「选了但永远不生效」的偏好（orderByPreferredAccount 找不到就原样返回，
+          //    全程零提示 —— 正是本方案要避免的静默失效）。
+          if (typeof req.accountId === 'string') {
+            const accounts = await pool.listAllAccounts()
+            if (!accounts.some((a) => a.provider === req.provider && a.id === req.accountId)) {
+              return {
+                ok: false,
+                error: { code: 'bad-request', message: `账号 ${String(req.accountId)} 不属于 ${req.provider}` },
+              }
+            }
+          }
+          try {
+            await pool.setPreferredAccount(
+              req.provider,
+              req.sessionId,
+              typeof req.accountId === 'string' ? req.accountId : null,
+            )
+          } catch (error) {
+            return {
+              ok: false,
+              error: {
+                code: 'bad-request',
+                message: error instanceof Error ? error.message : String(error),
+              },
+            }
+          }
+          return { ok: true, value: { selected: pool.preferredAccountFor(req.provider, req.sessionId) ?? null } }
+        }
+
       case 'account.reorder': {
         const req = payload as RpcReorderAccountsRequest
         if (typeof req.provider !== 'string' || req.provider.length === 0) {

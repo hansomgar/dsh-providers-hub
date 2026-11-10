@@ -123,6 +123,50 @@ export type PermanentLockMap = Record<string, boolean>
 export type StrictManualOrderMap = Record<string, boolean>
 
 /**
+ * 「优先帐号」的**会话级**偏好：provider → (sessionId → 选择)。
+ *
+ * ## 语义
+ *
+ * 决定「本次会话的请求**优先**用哪个账号」。缺键 = 走默认切换策略（升级前行为）。
+ *
+ * ## ⚠️ 为什么是**两层**稀疏表（provider 再 session）
+ *
+ * - **按 provider**：各家的账号池互不相通，同一个 sessionId 在 workbuddy 与
+ *   codearts 下可以各选一个号；
+ * - **按 session**：这正是用户要的「**当前会话**」语义 —— 换个会话就该回到默认，
+ *   否则「优先」会变成事实上的「全局固定」，用户无从预期。
+ *
+ * ## ⚠️ 为什么存 `accountId` 而不是「排序位次」
+ *
+ * 用户视觉上是「第 N 个帐号」，但**位次会随拖拽变化**（账号重排、增删都会移位）。
+ * 若存位次，用户拖一下顺序就会静默改掉「优先用哪个号」。存 id 后位次只在
+ * 渲染时现算（见 RPC `account.getPreferred` 的 `position`）。
+ *
+ * ## ⚠️ `at` 是淘汰依据，不是业务数据
+ *
+ * 会话是会不断新建的，不淘汰的话本表会无限增长。写入时按 `at` 保留最近
+ * {@link PREFERRED_ACCOUNT_MAX_SESSIONS} 条（见 `prunePreferredAccounts`）。
+ */
+export type PreferredAccountMap = Record<string, Record<string, PreferredAccountEntry>>
+
+/** {@link PreferredAccountMap} 的叶子结点。 */
+export interface PreferredAccountEntry {
+  /** 用户选中的账号 id。 ⚠️ 一律 `accountId`，绝不存位次（见 {@link PreferredAccountMap}）。 */
+  accountId: string
+  /** 最后一次写入时刻（epoch ms）。**只用于淘汰**，不参与任何选号判定。 */
+  at: number
+}
+
+/**
+ * 每个 provider 下**最多保留**多少个会话的偏好。
+ *
+ * 取 64 的理由：一个典型用户并存的活跃会话在个位数到十几个量级，
+ * 64 足够覆盖「最近用过的会话」，而单条记录只有几十字节 ⇒ 文档仍很小。
+ * ⚠️ 不要调成 0 或负数：那会让本功能**静默失效**（写进去立刻被淘汰掉）。
+ */
+export const PREFERRED_ACCOUNT_MAX_SESSIONS = 64
+
+/**
  * Jet Hub 的**唯一**入口位置。
  *
  * 两个取值严格互斥，任一时刻只有一个入口存在（见 {@link JetHubState.panelEntry}）。
@@ -265,6 +309,20 @@ export interface JetHubState {
    * 缺键语义为**关闭**：老用户升级后行为与升级前**逐字节一致**。
    */
   strictManualOrder?: StrictManualOrderMap
+  /**
+   * 「优先帐号」的会话级偏好（{@link PreferredAccountMap}）。
+   *
+   * 语义：某 provider 在某**会话**下，请求**优先**使用 `accountId` 对应的账号；
+   * 它不可用时按既有切换策略取下一个。缺键 = 默认策略，**与升级前逐字节一致**。
+   *
+   * ⚠️ 「优先」**只在同档内生效**（见 `credential-resolver.ts` 的
+   * `applyPreferredAccount`）：不会让「只有永久积分」的号越过「有临期积分」的号，
+   * 否则会让临期额度闲置、与既有的临期优先设计直接冲突。
+   *
+   * ⚠️ 老版本代码整体重写 `state.json` 时会丢掉本键 ⇒ 回到默认策略
+   *（方向保守：不会静默改变选号结果）。
+   */
+  preferredAccount?: PreferredAccountMap
   /**
    * 「面板入口」：Jet Hub 的**唯一**入口位置（{@link PanelEntry}）。
    *
@@ -449,6 +507,11 @@ export const jetHubSchema = Schema.object({
   // ⚠️ 绝不能写成 `Schema.boolean().default(false)` —— 它是**按 provider 的稀疏表**，
   //   不是全局布尔；写成布尔会把「只给某一家开」这件事从数据形状上抹掉。
   strictManualOrder: Schema.dict(Schema.any()).default({}),
+  // 「优先帐号」：**默认空表**（= 升级前行为，走默认切换策略）。
+  // ⚠️ 与 `strictManualOrder` 同款：`Schema.dict(Schema.any())` 只负责类型，
+  //    两层稀疏表（provider → session → {accountId, at}）的合法性由
+  //    `sanitizePreferredAccounts` 在**读写两侧**统一判，两处用同一份判据才不会漂移。
+  preferredAccount: Schema.dict(Schema.any()).default({}),
   // 缺键 = 「仅侧栏」（升级前的默认就是显示那一行；改掉是显式动作）。
   // ⚠️ 用 `Schema.string()` 而不是 `Schema.union([...])`：schema 只负责类型，
   // 取值合法性由 `sanitizePanelEntry` 在**读写两侧**统一判（老契约后端不经过
@@ -531,6 +594,65 @@ export function sanitizeNativeWebSearchEnabled(raw: unknown): boolean {
  */
 export function sanitizeSessionBalanceEnabled(raw: unknown): boolean {
   return raw !== false
+}
+
+/**
+ * 归一化「优先帐号」表（{@link JetHubState.preferredAccount}）。
+ *
+ * ## 判据（每条都有对应后果）
+ *
+ * - 非对象 / 数组 / `null` ⇒ 空表（升级前行为）；
+ * - provider 或 sessionId 为空串 ⇒ 丢弃（空 sessionId 会让「全局默认」与
+ *   「某会话」撞成同一个键，两者语义不同）；
+ * - 叶子必须是 `{ accountId: 非空字符串, at: 有限数字 }`，
+ *   否则丢弃 —— 缺 `at` 的条目无法参与淘汰，留着只会在文档里**永久占位**；
+ * - 最后统一按 `at` 淘汰，只保留最近 {@link PREFERRED_ACCOUNT_MAX_SESSIONS} 个会话。
+ *
+ * ⚠️ **在读、写两侧都要调用**（与本仓 `sanitizeStrictManualOrder` 同款）：
+ * 老契约后端不经过 schema，只靠这个函数；两处用同一份判据才不会漂移。
+ */
+export function sanitizePreferredAccounts(raw: unknown): PreferredAccountMap {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return {}
+  const result: PreferredAccountMap = {}
+  for (const [provider, sessions] of Object.entries(raw as Record<string, unknown>)) {
+    if (provider.length === 0) continue
+    if (typeof sessions !== 'object' || sessions === null || Array.isArray(sessions)) continue
+    const clean: Record<string, PreferredAccountEntry> = {}
+    for (const [sessionId, entry] of Object.entries(sessions as Record<string, unknown>)) {
+      if (sessionId.length === 0) continue
+      if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) continue
+      const record = entry as Record<string, unknown>
+      const accountId = record.accountId
+      const at = record.at
+      if (typeof accountId !== 'string' || accountId.length === 0) continue
+      if (typeof at !== 'number' || !Number.isFinite(at) || at < 0) continue
+      clean[sessionId] = { accountId, at }
+    }
+    const pruned = prunePreferredAccounts(clean, PREFERRED_ACCOUNT_MAX_SESSIONS)
+    if (Object.keys(pruned).length > 0) result[provider] = pruned
+  }
+  return result
+}
+
+/**
+ * 按 `at` 保留最近 `limit` 个会话（纯函数，便于单测直接驱动）。
+ *
+ * ⚠️ 用**插入顺序稳定**的写法：`Object.entries` 保持字符串键的插入序，
+ * 而 `sort` 在相等 `at` 下的相对顺序由引擎保证稳定（ES2019+）——同一毫秒写入的
+ * 多条不会被无意义地重排。**不要在比较器里再做别的判断**：`at` 是唯一依据。
+ */
+export function prunePreferredAccounts(
+  sessions: Readonly<Record<string, PreferredAccountEntry>>,
+  limit: number = PREFERRED_ACCOUNT_MAX_SESSIONS,
+): Record<string, PreferredAccountEntry> {
+  const entries = Object.entries(sessions)
+  // 上限非正 ⇒ 一条都不留（调用方给出非法配置时的确定性结果，而不是「全留」）。
+  if (!Number.isFinite(limit) || limit <= 0) return {}
+  if (entries.length <= limit) return { ...sessions }
+  const kept = [...entries].sort((a, b) => b[1].at - a[1].at).slice(0, limit)
+  // 恢复成「按 at 升序」的插入序，落盘后 diff 更稳定（不因淘汰而抖动键序）。
+  kept.sort((a, b) => a[1].at - b[1].at)
+  return Object.fromEntries(kept)
 }
 
 /**
@@ -1210,6 +1332,7 @@ class SettingsStore implements JetHubStore {
         nativeWebSearchEnabled?: unknown
         sessionBalanceEnabled?: unknown
         strictManualOrder?: unknown
+        preferredAccount?: unknown
         // ⚠️ 老键，只为迁移而读（新文档不再写它）：见 sanitizePanelEntry 的第二参。
         sidebarEntryEnabled?: unknown
         panelEntry?: unknown
@@ -1240,6 +1363,7 @@ class SettingsStore implements JetHubStore {
       sessionBalanceEnabled: sanitizeSessionBalanceEnabled(value.sessionBalanceEnabled),
       // 老文档没这个键 → 空表（= 全部走余额分档，升级前行为）。
       strictManualOrder: sanitizeStrictManualOrder(value.strictManualOrder),
+      preferredAccount: sanitizePreferredAccounts(value.preferredAccount),
       // 老文档没新键 → 按老布尔迁移（只有明确 false 才是「仅设置页」）；两者都没有 → 仅侧栏。
       panelEntry: sanitizePanelEntry(value.panelEntry, value.sidebarEntryEnabled),
       // 老文档没这个键 → 空数组（未自定义），展示侧按声明顺序渲染。
@@ -1301,6 +1425,7 @@ class SettingsStore implements JetHubStore {
       //    症状极难归因：用户只会看到「拖拽又不灵了」，而面板序号还停在 1。
       //    过一遍 sanitize：入参可能来自任何调用方，脏值不该被写进文档。
       strictManualOrder: sanitizeStrictManualOrder(state.strictManualOrder),
+      preferredAccount: sanitizePreferredAccounts(state.preferredAccount),
       // ⚠️ **必须带上本键**（与 `nativeWebSearchEnabled` 同因，是同一个
       //    `replace` 整体替换陷阱的第二个受害者）：漏键会让用户改过的
       //    「面板入口」在**任何**一次账号/黑名单/网关/顺序写入时被抹掉，
@@ -1652,6 +1777,7 @@ class FileStore implements JetHubStore {
         nativeWebSearchEnabled?: unknown
         sessionBalanceEnabled?: unknown
         strictManualOrder?: unknown
+        preferredAccount?: unknown
         // ⚠️ 老键，只为迁移而读（新文档不再写它）：见 sanitizePanelEntry 的第二参。
         sidebarEntryEnabled?: unknown
         panelEntry?: unknown
@@ -1680,6 +1806,7 @@ class FileStore implements JetHubStore {
         sessionBalanceEnabled: sanitizeSessionBalanceEnabled(value.sessionBalanceEnabled),
         // 老文档没这个键 → 空表（= 全部走余额分档，与升级前行为一致）。
         strictManualOrder: sanitizeStrictManualOrder(value.strictManualOrder),
+        preferredAccount: sanitizePreferredAccounts(value.preferredAccount),
         // 老文档没新键 → 按老布尔迁移（与 `SettingsStore` 同一判据）；两者都没有 → 仅侧栏。
         panelEntry: sanitizePanelEntry(value.panelEntry, value.sidebarEntryEnabled),
         // 老文档没这个键 → 空数组（未自定义），展示侧按声明顺序渲染。

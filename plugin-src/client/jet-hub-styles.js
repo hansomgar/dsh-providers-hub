@@ -1450,6 +1450,16 @@ const STYLES = `
 .dim-jh-badgePrefBtn:hover { color: var(--dsw-alias-label-primary); }
 /* 选中项自带描边：浅色下只靠白色底与底色区分太弱 */
 .dim-jh-badgePrefBtn[aria-pressed="true"] { border: .5px solid color-mix(in srgb, var(--dsw-alias-brand-primary) 45%, var(--dsw-alias-border-l2)); background: var(--dsw-alias-bg-layer-1); color: var(--dsw-alias-brand-primary); font-weight: 600; box-shadow: 0 1px 2px rgba(0, 0, 0, .06); }
+/* 「优先帐号」行：与上面的显示偏好**同一视觉语言但独立一行** ——
+   两者语义完全不同（改显示 vs 改选号），共用一行会让用户以为切了显示就换了号。
+   ⚠️ 这里刻意**不用** .dim-jh-badgePref 的分段控件外观（它是 3 个等宽按钮），
+   而是 label + select 的常规表单形态：下拉框本来就不是「分段选择」的隐喻。 */
+.dim-jh-badgePrefAccount { align-items: center; gap: 6px; padding: 3px 4px; }
+.dim-jh-badgePrefLabel { flex: none; color: var(--dsw-alias-label-secondary); font-size: 10px; line-height: 1.6; white-space: nowrap; }
+/* ⚠️ flex:1 + min-width:0：昵称可能很长（用户在别处填的），
+   不给 min-width: 0 会让本行撑破弹窗宽度。 */
+.dim-jh-badgeSelect { flex: 1; min-width: 0; padding: 2px 4px; border: .5px solid var(--dsw-alias-border-l2); border-radius: 5px; background: var(--dsw-alias-bg-layer-1); color: var(--dsw-alias-label-primary); font: inherit; font-size: 10px; line-height: 1.6; cursor: pointer; }
+.dim-jh-badgeSelect:disabled { opacity: .6; cursor: default; }
 /* 分区：细分隔线分组，间距 5px（比 4px 多 1px 呼吸：账号备注是 10px 灰字，
    紧贴下一个账号名会读成同一块；再大就不「小巧」了）
    ⚠️ 分隔线用**全不透明**的 border-l2：此前用 color-mix 降到 75%，浅色下几乎看不见。 */
