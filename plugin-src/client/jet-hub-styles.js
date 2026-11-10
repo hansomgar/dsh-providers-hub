@@ -997,11 +997,15 @@ const STYLES = `
 .dim-jh-ledgerCardSum { margin-left: auto; font-size: 11.5px; line-height: 17px; font-variant-numeric: tabular-nums; color: var(--dsw-alias-label-secondary, #4e5969); white-space: nowrap; }
 .dim-jh-ledgerProvider { padding: 4px 10px 6px; }
 .dim-jh-ledgerProvider + .dim-jh-ledgerProvider { border-top: .5px solid var(--dsw-alias-border-l3, #eef0f3); }
-/* 账号层（第 2 期）：只在多账号（或含「未归属」）时渲染，缩进一层；
-   单账号 provider 不展开 —— 一比一的中间层是纯噪音。 */
+/* 账号层：**一律渲染**（单账号也分层，2026-11-10 用户决策 Q3）。
+   多账号时缩进一层以区分「兄弟账号」；单账号不缩进 —— 改前单账号是平铺的，
+   分层后若照样缩进，模型名会被白白挤窄一截，而单账号占绝大多数场景。 */
 .dim-jh-ledgerAccount { min-width: 0; }
 .dim-jh-ledgerAccount + .dim-jh-ledgerAccount { border-top: .5px dashed var(--dsw-alias-border-l3, #eef0f3); }
 .dim-jh-ledgerAccountHead { display: flex; align-items: baseline; gap: 8px; padding: 3px 0 1px 8px; }
+/* 单账号：账号头不吃额外缩进，与模型行左缘对齐（data-single 由渲染层给出）。 */
+.dim-jh-ledgerAccount[data-single="true"] > .dim-jh-ledgerAccountHead { padding-left: 0; }
+.dim-jh-ledgerAccount[data-single="true"] > .dim-jh-ledgerModel { padding-left: 8px; }
 .dim-jh-ledgerAccountName { min-width: 0; font-size: 11.5px; line-height: 17px; font-weight: 600; color: var(--dsw-alias-label-secondary, #4e5969); overflow-wrap: anywhere; }
 .dim-jh-ledgerAccountSum { margin-left: auto; flex: none; font-size: 11px; line-height: 16px; font-variant-numeric: tabular-nums; color: var(--dsw-alias-label-tertiary, #8f959e); white-space: nowrap; }
 .dim-jh-ledgerProviderHead { display: flex; align-items: baseline; gap: 8px; padding: 4px 0 2px; }
@@ -1036,7 +1040,10 @@ const STYLES = `
 .dim-jh-ledgerDateRange label { display: flex; align-items: center; gap: 5px; color: var(--dsw-alias-label-tertiary, #8f959e); font-size: 11px; }
 .dim-jh-ledgerDateRange input { width: 136px; padding: 3px 6px; font-size: 11px; }
 .dim-jh-ledgerExport { flex: none; }
-/* 明细表：紧凑小字；模型列允许换行（长 wire 名不能截断 —— 网关弹窗同一条教训）。 */
+/* 明细表：紧凑小字；模型列允许换行（长 wire 名不能截断 —— 网关弹窗同一条教训）。
+   「账号」列（9 列版新增）**截断而不是换行**：账号名是给人认人的标签，
+   换行会把整张表的行高撑乱；完整值靠 title 悬停（用户决策 Q2-A）。 */
+.dim-jh-ledgerTable .dim-jh-ledgerEntryAccount { max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .dim-jh-ledgerEntryTools { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin: 12px 0 5px; }
 .dim-jh-ledgerEntryTools strong { margin-right: 2px; font-size: 13px; color: var(--dsw-alias-label-primary, #1f2329); }
 .dim-jh-ledgerEntryCount { margin-right: auto; color: var(--dsw-alias-label-tertiary, #8f959e); font-size: 11px; font-variant-numeric: tabular-nums; }
@@ -1059,6 +1066,8 @@ const STYLES = `
   .dim-jh-ledgerSelect { flex: 1 1 30%; max-width: none; }
   .dim-jh-ledgerTable { font-size: 10px; }
   .dim-jh-ledgerTable th, .dim-jh-ledgerTable td { padding: 3px 2px; overflow-wrap: anywhere; }
+  /* 窄屏 9 列：账号列再收窄，其余列让位（模型列本来就允许换行）。 */
+  .dim-jh-ledgerTable .dim-jh-ledgerEntryAccount { max-width: 72px; }
 }
 
 /* ── 模型列表的「计费/来源」分组（订阅 / 免费 / Cline Cloud / 按量计费）──

@@ -154,6 +154,7 @@ import {
   accountLabel,
   avgPerfDetailTooltip,
   avgPerfText,
+  buildAccountNameMap,
   channelCardTitle,
   channelLabel,
   channelOrder,
@@ -2711,6 +2712,50 @@ function downloadCsv(filename, headers, rows) {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
+/**
+ * 「最近请求」表的列头。
+ *
+ * ⚠️⚠️ **顺序与 `renderEntries` 里 `<td>` 的顺序严格一一对应**（9 列）。只改一处会
+ * 让**所有列整体错位**（比不加列更糟），故两边都从这一个常量读 —— 原先列头是
+ * 内联字面量、行是手写 8 个 `td`，两处各写一份正是错位的来源。
+ *
+ * 「账号」放在「渠道」之后、「模型」之前：渠道 → 账号 → 模型是自然的层级递减。
+ * 表头 `title` 说明账号名的来源与回落规则（悬停时用户能自己判断「为什么这行是 id」）。
+ *
+ * ⚠️ `width` 是给 `table-layout: fixed` 用的列宽（合计 100%）。**必须有**：
+ * fixed 布局下不写宽度就是等分，8 列时每列约 112px 还能凑合，加到 9 列就只剩
+ * 约 101px —— 模型名列（`dfmodel` / `deepseek-v4.1-flash`）会被压到换行成三行。
+ * 账号列刻意给得比模型列窄：名字是给人认人的短标签，模型名才是这一行的主要信息。
+ */
+const LEDGER_ENTRY_COLUMNS = Object.freeze([
+  Object.freeze({ key: 'time', label: '时间', title: '请求发起时刻（本地时间）；悬停看完整日期', width: '10%' }),
+  Object.freeze({ key: 'channel', label: '渠道', title: '直连 = DSH 宿主对话；网关 = OpenAI 兼容网关', width: '8%' }),
+  Object.freeze({
+    key: 'account',
+    label: '账号',
+    title: '服务本笔请求的账号：优先显示备注名（nickname），其次上游用户名（accountName）；'
+      + '两者都取不到时显示内部 id（悬停可看完整 id）。账本不存名字，名字由各账号的凭据现读。',
+    width: '14%',
+  }),
+  Object.freeze({ key: 'model', label: '模型', title: '请求里 wire 上的模型 id', width: '20%' }),
+  Object.freeze({
+    key: 'tokens',
+    label: 'TOKEN',
+    title: '总处理量 = 未命中缓存输入 + 缓存命中输入 + 输出；缓存写入单列展示，不重复计入总量',
+    width: '12%',
+  }),
+  Object.freeze({ key: 'ttft', label: '首字', title: '首个内容块的耗时；没有内容帧时显示 —', width: '8%' }),
+  Object.freeze({ key: 'tps', label: '速率', title: '输出 token / 解码时长；解码不足 100ms 时不测', width: '10%' }),
+  Object.freeze({ key: 'duration', label: '耗时', title: '整笔请求的总耗时', width: '8%' }),
+  Object.freeze({ key: 'status', label: '状态', title: '成功 / 失败（悬停看失败原因）', width: '10%' }),
+]);
+
+/** 「最近请求」CSV 导出的列头 —— 与 {@link LEDGER_ENTRY_COLUMNS} 同序，账号列同位置。 */
+const LEDGER_ENTRY_CSV_COLUMNS = Object.freeze([
+  '时间', '渠道', '账号', '模型', '状态', '总处理量', '输入', '输出', '缓存命中', '缓存写入', '推理',
+  '首字毫秒', '输出tok每秒', '耗时毫秒', '错误',
+]);
+
 function TokenLedgerPanel({ rpcCall, onClose }) {
   const mounted = React.useRef(true);
   React.useEffect(() => () => { mounted.current = false; }, []);
@@ -2809,6 +2854,90 @@ function TokenLedgerPanel({ rpcCall, onClose }) {
 
   React.useEffect(() => { void loadHistory(historyRange); }, [historyRange, historyFromDay, historyToDay, loadHistory]);
 
+  /**
+   * 账号 id → 显示名（`nickname` → `accountName` → 回落 id，见 `accountLabel`）。
+   *
+   * 空 `Map` = 还没加载到。⚠️ **只影响名字**：表/树的主体数据来自账本，
+   * 名字取不到时 `accountLabel` 回落内部 id —— 绝不能因为「查名字失败」
+   * 就让整个 Token 面板报错（本仓库记录过太多次「辅助信息失败拖垮主视图」）。
+   */
+  const [accountNames, setAccountNames] = React.useState(() => new Map());
+  /** 已经拉过名字的 provider（每个 provider 每挂载只拉一次）。 */
+  const namedProviders = React.useRef(new Set());
+
+  /**
+   * 账本里出现过的 provider（实时汇总 ∪ 历史日树 ∪ 明细），排序后拼成串当依赖。
+   *
+   * ⚠️⚠️ **必须按 provider 逐家取，不能只调一次 `account.list`**：该端点的请求
+   * 体是 `{ provider }`（`RpcListAccountsRequest`），宿主实现是
+   * `pool.listAccounts(req.provider)` —— 过滤条件是 `a.provider === provider`。
+   * 传 `{}` 时 `provider` 是 `undefined`，**恒返回空数组且不报错**（症状是
+   * 「账号列全是裸 id」，与「名字没实现」完全同形）。
+   *
+   * ⚠️ 只拉**账本里出现过的**、不拉全部 29 家：`account.list` 对每个账号都要
+   * 读一次凭据（`pool.listAccounts` 里的 `credentials.describe`），magicrew 还会
+   * 顺带打上游取昵称 —— 为给用量面板配名字而扫全池，等于打开一次弹窗就把所有
+   * 渠道的后台接口跑一遍。
+   */
+  const ledgerProviderKey = React.useMemo(() => {
+    const ids = new Set();
+    const collect = (rows) => {
+      for (const row of Array.isArray(rows) ? rows : []) {
+        const providers = Array.isArray(row?.providers) ? row.providers : [];
+        for (const providerRow of providers) {
+          const id = providerRow?.provider;
+          if (typeof id === 'string' && id.length > 0) ids.add(id);
+        }
+      }
+    };
+    collect(snapshot?.channels);
+    for (const day of Array.isArray(history?.history) ? history.history : []) collect(day?.channels);
+    // 明细里可能有「聚合树里还没出现」的 provider（例如刚发完第一笔请求）。
+    for (const entry of Array.isArray(snapshot?.entries) ? snapshot.entries : []) {
+      const id = entry?.provider;
+      if (typeof id === 'string' && id.length > 0) ids.add(id);
+    }
+    return [...ids].sort().join(',');
+  }, [snapshot, history]);
+
+  /**
+   * 拉账号名。
+   *
+   * ⚠️ 依赖只有 `[ledgerProviderKey, rpcCall]` —— **不随日期窗口/筛选/翻页重拉**
+   * （那些都会改 `snapshot` / 各项筛选 state，挂上去等于每切一次窗口就把所有
+   * provider 的凭据重读一遍）。key 不变时 effect 不执行；`namedProviders` 再挡一层
+   * 「同一 provider 只拉一次」。
+   * ⚠️ 逐家独立失败 ⇒ 静默（那个 provider 的账号回落裸 id），绝不冒泡成面板报错。
+   * ⚠️ 逐家**就地合并**（不等最慢的那家）：一次 `account.list` 要读该家全部账号的
+   * 凭据，串成 `Promise.all` 会让一个慢渠道把整张表的名字一起拖住。
+   */
+  React.useEffect(() => {
+    const wanted = ledgerProviderKey.length === 0 ? [] : ledgerProviderKey.split(',');
+    const pending = wanted.filter((id) => !namedProviders.current.has(id));
+    if (pending.length === 0) return;
+    for (const id of pending) namedProviders.current.add(id);
+    for (const provider of pending) {
+      void rpcCall('account.list', { provider }).then(
+        (res) => {
+          // ⚠️ 用 `mounted`（只在卸载时置 false），**不用** effect 的 alive 守卫：
+          //    effect 重跑时若丢弃在飞结果，这些 provider 已被登记为「拉过」
+          //    ⇒ 名字永远补不回来（账号列从此恒显裸 id）。
+          if (!mounted.current) return;
+          const map = buildAccountNameMap(res?.accounts);
+          if (map.size === 0) return;
+          setAccountNames((prev) => {
+            const next = new Map(prev);
+            for (const [id, name] of map) if (!next.has(id)) next.set(id, name);
+            return next;
+          });
+        },
+        // ⚠️ **静默失败**（含该 provider 没有账号、端点拒答、连接断开）：
+        //    名字是辅助信息，账本主数据照常显示，只是回落 id。
+        () => {},
+      );
+    }
+  }, [ledgerProviderKey, rpcCall]);
+
   const channels = React.useMemo(() => {
     const list = Array.isArray(snapshot?.channels) ? [...snapshot.channels] : [];
     list.sort((a, b) => channelOrder(a?.channel, b?.channel));
@@ -2864,24 +2993,40 @@ function TokenLedgerPanel({ rpcCall, onClose }) {
             onClick: () => setSelected(key),
           }, key === null ? '全部' : channelLabel(key))))
       : null;
-    /** 一个 provider 的内部：多账号分层 / 单账号平铺（一比一的中间层是纯噪音）。 */
+    /**
+     * 一个 provider 的内部：**账号层一律渲染**（渠道 → provider → 账号 → 模型）。
+     *
+     * ⚠️ 单账号也分层（用户 2026-11-10 决策 Q3）。改前是 `accounts.length > 1`
+     * 才分层、单个账号直接平铺模型行 —— 那条「一比一的中间层是纯噪音」的判断
+     * 被用户推翻了：账号名现在是**真实用户名**（`nickname` → `accountName`），
+     * 用户要靠它区分「这一行到底走的哪个号」，而单账号恰恰是他最容易忽略的
+     * 「原来走的是这个号」的那一格。故判据改成 `> 0`，且**不加开关**。
+     *
+     * ⚠️ `length === 0` 必须落到 `return []`：进 `.map` 会渲染出一个**空账号容器**
+     * （有边框、没内容），比不渲染更糟。
+     */
     const renderProviderBody = (providerRow) => {
       const accounts = providerRow.accounts ?? [];
-      if (accounts.length > 1) {
-        return accounts.map((accountRow) => React.createElement('div', {
-          key: providerRow.provider + '#' + accountRow.accountId, className: 'dim-jh-ledgerAccount',
-        },
-          React.createElement('div', { className: 'dim-jh-ledgerAccountHead' },
-            React.createElement('span', { className: 'dim-jh-ledgerAccountName', title: accountRow.accountId },
-              accountLabel(accountRow.accountId)),
-            perfCell(accountRow.totals),
-            React.createElement('span', { className: 'dim-jh-ledgerAccountSum', title: tokenSummaryTooltip(accountRow.totals) },
-              tokenSummaryText(accountRow.totals))),
-          accountRow.models.map((modelRow) =>
-            renderModelRow(modelRow, modelRow.model))));
-      }
-      return accounts.flatMap((accountRow) => accountRow.models.map((modelRow) =>
-        renderModelRow(modelRow, providerRow.provider + '#' + modelRow.model)));
+      if (accounts.length === 0) return [];
+      /**
+       * ⚠️ 单账号时**不额外缩进**（多账号才缩）。改前单账号是平铺的，分层之后
+       * 整体会往右挪一层；单账号占绝大多数场景，多缩一层等于把模型名挤窄。
+       * 多账号本来就有一层「兄弟账号」的区分需求，缩进保留。
+       */
+      const indent = accounts.length > 1;
+      return accounts.map((accountRow) => React.createElement('div', {
+        key: providerRow.provider + '#' + accountRow.accountId,
+        className: 'dim-jh-ledgerAccount',
+        'data-single': indent ? 'false' : 'true',
+      },
+        React.createElement('div', { className: 'dim-jh-ledgerAccountHead' },
+          React.createElement('span', { className: 'dim-jh-ledgerAccountName', title: accountRow.accountId },
+            accountLabel(accountRow.accountId, accountNames)),
+          perfCell(accountRow.totals),
+          React.createElement('span', { className: 'dim-jh-ledgerAccountSum', title: tokenSummaryTooltip(accountRow.totals) },
+            tokenSummaryText(accountRow.totals))),
+        accountRow.models.map((modelRow) =>
+          renderModelRow(modelRow, accountRow.accountId + '#' + modelRow.model))));
     };
 
     return React.createElement(React.Fragment, null,
@@ -2931,10 +3076,19 @@ function TokenLedgerPanel({ rpcCall, onClose }) {
   const safeEntryPage = Math.min(entryPage, entryPageCount);
   const pageEntries = visibleEntries.slice((safeEntryPage - 1) * 50, safeEntryPage * 50);
 
+  /**
+   * 导出当前筛选后的明细。
+   *
+   * ⚠️ CSV 的列顺序必须与表格**同序**（都含「账号」列，且都在「渠道」之后）——
+   * 用户会拿导出去核对界面，两处顺序一错就等于两份互相矛盾的报表。
+   * 账号列导出的是**显示名**（与界面一致），不是内部 id：内部 id 对 Excel 里的人
+   * 没有意义，而界面上认的就是这个名字。
+   */
   const exportEntries = () => downloadCsv('token-usage-details.csv',
-    ['时间', '渠道', '模型', '状态', '总处理量', '输入', '输出', '缓存命中', '缓存写入', '推理', '首字毫秒', '输出tok每秒', '耗时毫秒', '错误'],
+    [...LEDGER_ENTRY_CSV_COLUMNS],
     visibleEntries.map((entry) => [
-      Number.isFinite(entry.ts) ? new Date(entry.ts).toISOString() : '', channelLabel(entry.channel), entry.model,
+      Number.isFinite(entry.ts) ? new Date(entry.ts).toISOString() : '', channelLabel(entry.channel),
+      accountLabel(entry.accountId, accountNames), entry.model,
       entry.error === undefined ? '成功' : '失败',
       // ⚠️ 未收到 usage 的失败行导出**空串**而非 0：界面用 `—` 与真实的 0 严格区分
       //（见 token-ledger.ts 的「0 会被读成瞬间完成、没花 token」注释），
@@ -2990,19 +3144,31 @@ function TokenLedgerPanel({ rpcCall, onClose }) {
       React.createElement('div', { className: 'dim-jh-empty' }, '没有符合当前筛选条件的请求。'));
     return React.createElement('div', { key: 'entries' }, toolbar,
       React.createElement('table', { className: 'dim-jh-ledgerTable' },
+      // ⚠️ `table-layout: fixed` 下必须有列宽，否则 9 列等分把模型名压成三行
+      //（8 列时勉强够，加一列就崩）。列宽与表头同源（`LEDGER_ENTRY_COLUMNS`）。
+      React.createElement('colgroup', null,
+        LEDGER_ENTRY_COLUMNS.map((column) =>
+          React.createElement('col', { key: column.key, style: { width: column.width } }))),
       React.createElement('thead', null,
         React.createElement('tr', null,
-          ['时间', '渠道', '模型', 'TOKEN', '首字', '速率', '耗时', '状态'].map((h) =>
-            React.createElement('th', {
-              key: h,
-              title: h === 'TOKEN' ? '总处理量 = 未命中缓存输入 + 缓存命中输入 + 输出；缓存写入单列展示，不重复计入总量' : undefined,
-            }, h)))),
+          // ⚠️ 列头与下面的 `<td>` 由同一个列定义表驱动（`LEDGER_ENTRY_COLUMNS`）：
+          //    两处各写一份必然错位，而错位是「所有列都不对」——比不加列更糟。
+          LEDGER_ENTRY_COLUMNS.map((column) =>
+            React.createElement('th', { key: column.key, title: column.title }, column.label)))),
       React.createElement('tbody', null, pageEntries.map((entry, index) => React.createElement('tr', {
         key: entry.ts + '-' + index,
         'data-error': entry.error !== undefined ? 'true' : 'false',
       },
         React.createElement('td', { title: new Date(entry.ts).toLocaleString() }, formatEntryTime(entry.ts)),
         React.createElement('td', null, channelLabel(entry.channel)),
+        // ⚠️ 账号格：只显示名字，**完整 id 靠悬停**（用户 2026-11-10 决策 Q2-A）。
+        //    `entry.accountId` 是可选的（取不到时为空串）⇒ `accountLabel('')` 给「未归属」。
+        //    ⚠️ `title` 为空串时不挂这个属性（空 title 在浏览器里表现为**没有** tooltip，
+        //    留着它只会让人以为「悬停没反应是坏的」）。
+        React.createElement('td', {
+          className: 'dim-jh-ledgerEntryAccount',
+          title: typeof entry.accountId === 'string' && entry.accountId.length > 0 ? entry.accountId : '未归属账号',
+        }, accountLabel(entry.accountId, accountNames)),
         React.createElement('td', { className: 'dim-jh-ledgerEntryModel' }, entry.model),
         React.createElement('td', { title: tokenSummaryTooltip(entry) }, entryTokenText(entry)),
         React.createElement('td', null, formatTtft(entry)),
@@ -3170,20 +3336,27 @@ function TokenLedgerPanel({ rpcCall, onClose }) {
           perfCell(providerRow.totals),
           React.createElement('span', { className: 'dim-jh-ledgerAccountSum', title: tokenSummaryTooltip(providerRow.totals) },
             tokenSummaryText(providerRow.totals))),
-        (providerRow.accounts ?? []).length > 1
-          ? providerRow.accounts.map((accountRow) => React.createElement('div', {
-              key: providerRow.provider + '#' + accountRow.accountId, className: 'dim-jh-ledgerAccount',
-              style: { padding: '0 0 0 8px' },
-            },
-              React.createElement('div', { className: 'dim-jh-ledgerAccountHead' },
-                React.createElement('span', { className: 'dim-jh-ledgerAccountName' },
-                  accountLabel(accountRow.accountId)),
-                React.createElement('span', { className: 'dim-jh-ledgerAccountSum', title: tokenSummaryTooltip(accountRow.totals) },
-                  tokenSummaryText(accountRow.totals))),
-              accountRow.models.map((modelRow) =>
-                renderModelRow(modelRow, accountRow.accountId + '#' + modelRow.model))))
-          : (providerRow.accounts ?? []).flatMap((accountRow) => accountRow.models.map((modelRow) =>
-              renderModelRow(modelRow, providerRow.provider + '#' + modelRow.model))))))));
+        // ⚠️ 与实时汇总卡**同一条判据**：账号层一律渲染（单账号也分层），0 个账号
+        //    给空数组。历史日树原先还是「>1 才分层」，与改后的实时卡分叉 —— 同一天
+        //    的数据在两处显示不同的层级，用户会以为其中一份算错了。
+        (providerRow.accounts ?? []).length > 0
+          ? (() => {
+              const dayAccounts = providerRow.accounts ?? [];
+              const dayIndent = dayAccounts.length > 1;
+              return dayAccounts.map((accountRow) => React.createElement('div', {
+                key: providerRow.provider + '#' + accountRow.accountId, className: 'dim-jh-ledgerAccount',
+                'data-single': dayIndent ? 'false' : 'true',
+                style: dayIndent ? { padding: '0 0 0 8px' } : undefined,
+              },
+                React.createElement('div', { className: 'dim-jh-ledgerAccountHead' },
+                  React.createElement('span', { className: 'dim-jh-ledgerAccountName', title: accountRow.accountId },
+                    accountLabel(accountRow.accountId, accountNames)),
+                  React.createElement('span', { className: 'dim-jh-ledgerAccountSum', title: tokenSummaryTooltip(accountRow.totals) },
+                    tokenSummaryText(accountRow.totals))),
+                accountRow.models.map((modelRow) =>
+                  renderModelRow(modelRow, accountRow.accountId + '#' + modelRow.model))));
+            })()
+          : [])))));
 
   return React.createElement('div', {
     className: 'dim-jh-modalOverlay',
@@ -9867,6 +10040,21 @@ export const __providersPanelForTest = ProviderPanel;
  * 不是公共 API：客户端 bundle 内部使用，外部不要依赖。
  */
 export const __creditBalanceRowForTest = CreditBalanceRow;
+
+/**
+ * 「Token 用量」弹窗，供测试真正渲染。
+ *
+ * ⚠️ 与上面两个 `__…ForTest` 同款取舍：本弹窗只在 `JetHubPage` 的**返回树**里
+ * 以 `React.createElement(TokenLedgerPanel, …)` 的形式出现，而本仓库单测的 react
+ * 替身**不展开子组件** ⇒ 从 `JetHubPage` 往下走只能拿到那个元素本身，拿不到它
+ * 内部的账号行 / 表格行。接线层（`account.list` 传参、`accountLabel` 的第二参、
+ * 表头与 `td` 的顺序）因此**零守卫**，三处各自都能被静默改坏。
+ * 真实缺陷形态已记录在 `docs/agent-notes/client-ui.md`（「循环指认」与
+ * 「纯函数全绿、接线层没测」）。
+ *
+ * 不是公共 API：客户端 bundle 内部使用，外部不要依赖。
+ */
+export const __tokenLedgerPanelForTest = TokenLedgerPanel;
 
 export function JetHubPage({ rpcCall }) {
   const [selected, setSelected] = React.useState(PROVIDERS[0].id);
