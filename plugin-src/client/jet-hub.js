@@ -3009,15 +3009,14 @@ function TokenLedgerPanel({ rpcCall, onClose }) {
       const accounts = providerRow.accounts ?? [];
       if (accounts.length === 0) return [];
       /**
-       * ⚠️ 单账号时**不额外缩进**（多账号才缩）。改前单账号是平铺的，分层之后
-       * 整体会往右挪一层；单账号占绝大多数场景，多缩一层等于把模型名挤窄。
-       * 多账号本来就有一层「兄弟账号」的区分需求，缩进保留。
+       * ⚠️ 单账号与多账号**样式完全一致**（用户 2026-11-11 决策）—— 故这里**不再**
+       * 产出 `data-single`，也不按账号数改缩进：层级由账号行的色块表达，不由缩进
+       * 表达。原先那条「单账号不缩进」的分支已删除，`data-single` 属性与它的两条
+       * CSS 规则一并移除（留着就是永远不生效的死代码，下一个改样式的人会以为它还在管用）。
        */
-      const indent = accounts.length > 1;
       return accounts.map((accountRow) => React.createElement('div', {
         key: providerRow.provider + '#' + accountRow.accountId,
         className: 'dim-jh-ledgerAccount',
-        'data-single': indent ? 'false' : 'true',
       },
         React.createElement('div', { className: 'dim-jh-ledgerAccountHead' },
           React.createElement('span', { className: 'dim-jh-ledgerAccountName', title: accountRow.accountId },
@@ -3339,23 +3338,20 @@ function TokenLedgerPanel({ rpcCall, onClose }) {
         // ⚠️ 与实时汇总卡**同一条判据**：账号层一律渲染（单账号也分层），0 个账号
         //    给空数组。历史日树原先还是「>1 才分层」，与改后的实时卡分叉 —— 同一天
         //    的数据在两处显示不同的层级，用户会以为其中一份算错了。
+        // ⚠️ 也**不再**按账号数缩进/挂 `data-single`：样式统一，层级靠账号行色块表达
+        //    （用户 2026-11-11 决策「单账号与多账号完全一样」）。历史树原先那条
+        //    内联 `padding` 会把同一套色块挤歪，故一并删掉。
         (providerRow.accounts ?? []).length > 0
-          ? (() => {
-              const dayAccounts = providerRow.accounts ?? [];
-              const dayIndent = dayAccounts.length > 1;
-              return dayAccounts.map((accountRow) => React.createElement('div', {
-                key: providerRow.provider + '#' + accountRow.accountId, className: 'dim-jh-ledgerAccount',
-                'data-single': dayIndent ? 'false' : 'true',
-                style: dayIndent ? { padding: '0 0 0 8px' } : undefined,
-              },
-                React.createElement('div', { className: 'dim-jh-ledgerAccountHead' },
-                  React.createElement('span', { className: 'dim-jh-ledgerAccountName', title: accountRow.accountId },
-                    accountLabel(accountRow.accountId, accountNames)),
-                  React.createElement('span', { className: 'dim-jh-ledgerAccountSum', title: tokenSummaryTooltip(accountRow.totals) },
-                    tokenSummaryText(accountRow.totals))),
-                accountRow.models.map((modelRow) =>
-                  renderModelRow(modelRow, accountRow.accountId + '#' + modelRow.model))));
-            })()
+          ? (providerRow.accounts ?? []).map((accountRow) => React.createElement('div', {
+              key: providerRow.provider + '#' + accountRow.accountId, className: 'dim-jh-ledgerAccount',
+            },
+              React.createElement('div', { className: 'dim-jh-ledgerAccountHead' },
+                React.createElement('span', { className: 'dim-jh-ledgerAccountName', title: accountRow.accountId },
+                  accountLabel(accountRow.accountId, accountNames)),
+                React.createElement('span', { className: 'dim-jh-ledgerAccountSum', title: tokenSummaryTooltip(accountRow.totals) },
+                  tokenSummaryText(accountRow.totals))),
+              accountRow.models.map((modelRow) =>
+                renderModelRow(modelRow, accountRow.accountId + '#' + modelRow.model))))
           : [])))));
 
   return React.createElement('div', {

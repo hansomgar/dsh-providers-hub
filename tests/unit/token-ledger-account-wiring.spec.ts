@@ -282,10 +282,30 @@ describe('★ Token 面板按账号归档 · 接线层行为守卫', () => {
     await renderPanel(rpcCall)
     const accountRows = findAll((node) => node.props?.className === 'dim-jh-ledgerAccount')
     // workbuddy 只有 1 个账号 —— 改前它会被平铺，账号行根本不出现。
-    const single = accountRows.filter((node) => node.props?.['data-single'] === 'true')
-    expect(single.length).toBeGreaterThanOrEqual(1)
-    const singleTexts = single.flatMap((node) => textsIn([node]))
-    expect(singleTexts).toContain('clover e')
+    // ⚠️ 2026-11-11 起不再靠 `data-single` 找单账号（该属性已删，样式统一）：
+    //    判据改成「那个 provider 子树里确实只有这一段账号行」。
+    const heads = findAll((node) => node.props?.className === 'dim-jh-ledgerAccountName')
+      .map((node) => textsIn([node]).join(''))
+    // 单账号的 workbuddy 必须有自己的账号行（名字来自 nickname）。
+    expect(heads).toContain('clover e')
+    // 且它**没有**兄弟账号行 —— 证明这是「单账号」那一格，不是多账号碰巧命中。
+    expect(heads.filter((t) => t === 'clover e')).toHaveLength(1)
+    // 账号行数量 = 3（qodercn 两个 + workbuddy 一个），不多不少。
+    expect(accountRows).toHaveLength(3)
+  })
+
+  it('★★ 层级样式：账号行必须挂色块类名，模型行不挂（视觉区分度的接线守卫）', async () => {
+    const { rpcCall } = makeRpc()
+    await renderPanel(rpcCall)
+    // 账号头是**色块分组头**（方案 A）：className 必须是 ledgerAccountHead。
+    const heads = findAll((node) => node.props?.className === 'dim-jh-ledgerAccountHead')
+    expect(heads.length).toBe(3)
+    // 模型行必须是 ledgerModel（不带 Account 语义），否则样式会套错。
+    const models = findAll((node) => node.props?.className === 'dim-jh-ledgerModel')
+    expect(models.length).toBeGreaterThan(0)
+    // ⚠️ 死代码守卫：`data-single` 已随「单账号与多账号完全一样」的决策删除。
+    //    判据只认**属性键**（渲染出来的 props），不认源码注释。
+    expect(findAll((node) => 'data-single' in (node.props ?? {}))).toHaveLength(0)
   })
 
   it('★★★ 明细表「账号」列：表头与行的顺序逐格对应（只改一处会让所有列错位）', async () => {
