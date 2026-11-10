@@ -6,6 +6,7 @@ import {
   accountLabel,
   avgPerfText,
   avgPerfTooltip,
+  buildAccountNameMap,
   channelCardTitle,
   channelLabel,
   channelOrder,
@@ -134,6 +135,73 @@ describe('账号维度（第 2 期）', () => {
     expect(accountLabel('')).toBe('未归属')
     expect(accountLabel(undefined)).toBe('未归属')
     expect(accountLabel('qoder-bb211a53')).toBe('qoder-bb211a53')
+  })
+})
+
+/**
+ * 账号显示名（第 5 期，2026-11-10）：`nickname` → `accountName` → 内部 id。
+ *
+ * ⚠️ 第二参**必须可选**：不传时行为与加参数前逐字节相同（上面那条
+ * `accountLabel('qoder-bb211a53')` 就是这条契约的守卫，不许为迁就新代码改它）。
+ */
+describe('账号显示名 · nameMap 优先级与回落', () => {
+  it('nameMap 命中 ⇒ 用映射里的名字（昵称）', () => {
+    const names = new Map([['qodercn-c5a414d5', 'M籾 959']])
+    expect(accountLabel('qodercn-c5a414d5', names)).toBe('M籾 959')
+  })
+
+  it('nameMap 未命中 ⇒ 回落 id（账号删了但账本还有历史，这是对的）', () => {
+    const names = new Map([['other-account', '别的号']])
+    expect(accountLabel('qoder-bb211a53', names)).toBe('qoder-bb211a53')
+  })
+
+  it('nameMap 为 undefined ⇒ 回落 id（向后兼容：旧调用点不传第二参）', () => {
+    expect(accountLabel('qoder-bb211a53', undefined)).toBe('qoder-bb211a53')
+  })
+
+  it('nameMap 里的值是空串 ⇒ 回落 id（不许渲染成空白账号行）', () => {
+    expect(accountLabel('qoder-bb211a53', new Map([['qoder-bb211a53', '']]))).toBe('qoder-bb211a53')
+    // 非字符串（脏数据）同样回落。
+    expect(accountLabel('qoder-bb211a53', new Map([['qoder-bb211a53', 42 as unknown as string]])))
+      .toBe('qoder-bb211a53')
+  })
+
+  it('accountId 为空串 ⇒ 「未归属」，nameMap 不参与（空 key 不是账号）', () => {
+    expect(accountLabel('', new Map([['', '不该被读到']]))).toBe('未归属')
+    expect(accountLabel(undefined, new Map())).toBe('未归属')
+  })
+
+  it('nameMap 传普通对象（非 Map）也能工作', () => {
+    expect(accountLabel('qoder-bb211a53', { 'qoder-bb211a53': '超级清' })).toBe('超级清')
+    expect(accountLabel('qoder-bb211a53', {})).toBe('qoder-bb211a53')
+  })
+
+  it('★ buildAccountNameMap：nickname 优先于 accountName，都没有则不进映射', () => {
+    const map = buildAccountNameMap([
+      { id: 'a', nickname: '用户备注', accountName: 'upstream-name' },
+      { id: 'b', nickname: '', accountName: 'mylzscy4' },
+      { id: 'c', nickname: '', accountName: '' },
+      { id: 'd' },
+      { id: '', nickname: '没有 id' },
+      null,
+      undefined,
+      'not-an-object',
+      42,
+    ])
+    expect(map.get('a')).toBe('用户备注')
+    // nickname 空串**不是**名字 ⇒ 用 accountName（真实姓名）
+    expect(map.get('b')).toBe('mylzscy4')
+    // 两者都没有 ⇒ 不进映射（让 accountLabel 回落 id，而不是渲染空白）
+    expect(map.has('c')).toBe(false)
+    expect(map.has('d')).toBe(false)
+    expect(map.has('')).toBe(false)
+    expect(map.size).toBe(2)
+  })
+
+  it('buildAccountNameMap：非数组输入给空 Map（不抛）', () => {
+    expect(buildAccountNameMap(undefined).size).toBe(0)
+    expect(buildAccountNameMap(null).size).toBe(0)
+    expect(buildAccountNameMap({} as unknown as unknown[]).size).toBe(0)
   })
 })
 
