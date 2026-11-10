@@ -1094,12 +1094,20 @@ const STYLES = `
 /* 明细表：紧凑小字；模型列允许换行（长 wire 名不能截断 —— 网关弹窗同一条教训）。
    「账号」列（9 列版新增）**截断而不是换行**：账号名是给人认人的标签，
    换行会把整张表的行高撑乱；完整值靠 title 悬停（用户决策 Q2-A）。 */
-.dim-jh-ledgerTable .dim-jh-ledgerEntryAccount { max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 明细表：紧凑小字；模型列允许换行（长 wire 名不能截断 —— 网关弹窗同一条教训）。
+   账号列（9 列版新增）**截断而不是换行**：账号名是给人认人的标签，
+   换行会把整张表的行高撑乱；完整值靠 title 悬停（用户决策 Q2-A）。
+   ⚠️ max-width 与列宽（LEDGER_ENTRY_COLUMNS 里 account 的 172px）是两回事：
+   列宽由 colgroup 决定，这里只是**兜底不让它撑破**（colgroup 缺失或旧产物时）。 */
+.dim-jh-ledgerTable .dim-jh-ledgerEntryAccount { max-width: 172px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .dim-jh-ledgerEntryTools { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin: 12px 0 5px; }
 .dim-jh-ledgerEntryTools strong { margin-right: 2px; font-size: 13px; color: var(--dsw-alias-label-primary, #1f2329); }
 .dim-jh-ledgerEntryCount { margin-right: auto; color: var(--dsw-alias-label-tertiary, #8f959e); font-size: 11px; font-variant-numeric: tabular-nums; }
 .dim-jh-ledgerSearch { flex: 1 1 130px; width: auto; min-width: 120px; padding: 4px 7px; font-size: 11px; }
 .dim-jh-ledgerSelect { min-width: 82px; max-width: 130px; padding: 4px 6px; border: 1px solid var(--dsw-alias-border-l2, #d0d3d9); border-radius: 6px; background: var(--dsw-alias-bg-layer-1, #fff); color: var(--dsw-alias-label-primary, #1f2329); font-size: 11px; }
+/* ⚠️ table-layout 必须是 **fixed**：列宽由 colgroup 的像素值决定，
+   最后一列（模型）给 auto 吃掉剩余宽度。改成 auto 会让浏览器按内容
+   重新分配，把右侧数字列挤成不等宽（数字对不齐，比列宽不准更难看）。 */
 .dim-jh-ledgerTable { width: 100%; margin-top: 4px; border-collapse: collapse; table-layout: fixed; font-size: 11.5px; line-height: 17px; }
 .dim-jh-ledgerTable th { position: sticky; top: 0; z-index: 1; padding: 4px 6px; text-align: left; font-weight: 600; color: var(--dsw-alias-label-tertiary, #8f959e); background: var(--dsw-alias-bg-layer-1, #fff); border-bottom: .5px solid var(--dsw-alias-border-l3, #e5e5e5); }
 .dim-jh-ledgerTable td { padding: 3px 6px; border-bottom: .5px solid var(--dsw-alias-border-l3, #f0f1f3); font-variant-numeric: tabular-nums; color: var(--dsw-alias-label-secondary, #4e5969); vertical-align: baseline; }
@@ -1124,6 +1132,10 @@ const STYLES = `
      缩进减半后层级仍然看得出来（14/26px 相对 0 仍然错开），只是不再浪费宽度。 */
   .dim-jh-ledgerAccount { margin-left: 14px; }
   .dim-jh-ledgerModel { padding: 2px 0 2px 26px; }
+  /* ⚠️ 窄屏 9 列 + 固定像素列宽必然超宽：**横向滚动**而不是压缩各列。
+     压缩会把 9 列一起挤变形（数字列对不齐、模型名断成三行），比横向滚动更糟。
+     只给明细表加滚动容器，不影响上面的汇总卡。 */
+  .dim-jh-ledgerTableScroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
 }
 
 /* ── 模型列表的「计费/来源」分组（订阅 / 免费 / Cline Cloud / 按量计费）──

@@ -22,6 +22,7 @@ import {
   historyTitle,
   HISTORY_RANGES,
   ledgerSubtitle,
+  ledgerEntryModelText,
   rangeDaysOf,
   tokenSummaryText,
   todayDayKey,
@@ -561,5 +562,100 @@ describe('用量树三层视觉契约（provider / 账号 / 模型）', () => {
     expect(client).not.toMatch(/'data-single'\s*:/)
     expect(styles).not.toMatch(/\[data-single/)
     expect(client).not.toMatch(/\[data-single/)
+  })
+})
+
+/**
+ * 「最近请求」明细表：**模型列 = provider/model** + 列宽排布（2026-11-11 用户需求）。
+ *
+ * 用户原话：「列表中，模型显示应该是 provider/模型名的格式，跟上游原来的一样才行」
+ * 以及「你合理排布一下时间、渠道的长度（因为时间长度固定，渠道列只有直连和网关，
+ * 基本长度固定），以放下模型列一行显示」。
+ *
+ * ⚠️ 事实澄清：**上游原本就只显示裸模型 id**（`entry.model`），不是我们改坏的。
+ *   `provider/model` 是本轮**新增**的展示口径。`TokenLedgerEntry.provider` 一直都在，
+ *   故服务端零改动。
+ *
+ * ## 实测依据（960px 弹窗 / 11.5px 字体，见提交说明）
+ *
+ * | 内容 | 实测宽 |
+ * |---|---|
+ * | 时间 `00:19:26` | 42.2px |
+ * | 渠道 `直连`/`网关` | 23px |
+ * | 账号 `chenshuiguanggg@gmail.com` | 154.5px |
+ * | 最长模型串 `workbuddy/deepseek-v4.1-flash-free` | 187.3px（+12 内边距 = 199.3） |
+ *
+ * 改前的病根：时间给 9%、渠道给 8%（各自浪费约 50px），模型只拿到 182px ⇒ **截断**。
+ */
+describe('明细表 · 模型列格式与列宽排布', () => {
+  const styles = readFileSync(resolve(here, '../../plugin-src/client/jet-hub-styles.js'), 'utf8')
+
+  it('★ ledgerEntryModelText：拼成 provider/模型', () => {
+    expect(ledgerEntryModelText({ provider: 'workbuddy', model: 'deepseek-v4.1-flash' }))
+      .toBe('workbuddy/deepseek-v4.1-flash')
+    expect(ledgerEntryModelText({ provider: 'qodercn', model: 'dfmodel' })).toBe('qodercn/dfmodel')
+  })
+
+  it('★ 缺 provider 时只回模型名，不拼出 undefined/ 或 /model 脏串', () => {
+    // 账本里 provider 恒有值，但字段被截断/旧数据的形态不该渲染成脏串。
+    expect(ledgerEntryModelText({ model: 'dfmodel' })).toBe('dfmodel')
+    expect(ledgerEntryModelText({ provider: '', model: 'dfmodel' })).toBe('dfmodel')
+    expect(ledgerEntryModelText({ provider: 'qoder' })).toBe('')
+    expect(ledgerEntryModelText(undefined)).toBe('')
+    expect(ledgerEntryModelText(null)).toBe('')
+  })
+
+  it('★★★ 明细表的模型格必须用 ledgerEntryModelText（不是裸 entry.model）', () => {
+    // ⚠️ 判据打在**渲染表达式**上：写回 `entry.model` 就是本需求未实现。
+    expect(client).toMatch(/className:\s*'dim-jh-ledgerEntryModel',\s*title:\s*ledgerEntryModelText\(entry\)/s)
+    expect(client).toMatch(/\}, ledgerEntryModelText\(entry\)\)/)
+    // 反向：模型格那一段里不许再出现裸 `entry.model)`（导出另算，见下条）
+    const modelCell = client.match(/className: 'dim-jh-ledgerEntryModel'[\s\S]{0,180}?\)/)?.[0] ?? ''
+    expect(modelCell, '模型格应当只经 ledgerEntryModelText 取值').not.toMatch(/\}, entry\.model\)/)
+  })
+
+  it('★★ CSV 导出的模型列必须与界面同口径（provider/模型）', () => {
+    // 界面写 workbuddy/xxx、CSV 只写 xxx 就是两处自相矛盾。
+    expect(client).toMatch(/accountLabel\(entry\.accountId, accountNames\), ledgerEntryModelText\(entry\)/)
+  })
+
+  it('★★★ 列宽必须是「实测值」而不是百分比（百分比正是改前的病根）', () => {
+    // 时间/渠道压到贴紧内容：42.2 / 23px 的内容给 62 / 46px（含内边距）。
+    expect(client).toMatch(/key: 'time'[^}]*width: '62px'/)
+    expect(client).toMatch(/key: 'channel'[^}]*width: '46px'/)
+    // 账号 172px：实测最长邮箱 154.5px + 内边距 12px = 166.5px ⇒ 160px 会截断。
+    expect(client).toMatch(/key: 'account'[^}]*width: '172px'/)
+    // 模型列吃剩余宽度（auto），不是固定 200px（差 7.5px 会截断）。
+    expect(client).toMatch(/key: 'model'[^}]*width: 'auto'/)
+    // 右侧数字列按实测分配。
+    expect(client).toMatch(/key: 'tokens'[^}]*width: '104px'|key: 'tokens',\s*\n\s*label: 'TOKEN',[\s\S]{0,120}?width: '104px'/)
+    expect(client).toMatch(/key: 'ttft'[^}]*width: '58px'/)
+    expect(client).toMatch(/key: 'tps'[^}]*width: '86px'/)
+    expect(client).toMatch(/key: 'duration'[^}]*width: '58px'/)
+    expect(client).toMatch(/key: 'status'[^}]*width: '60px'/)
+    // ⚠️ 反向：整个列定义表里一个百分比都不许留（会退回「等分/浪费」的老形态）。
+    const colBlock = client.slice(client.indexOf('const LEDGER_ENTRY_COLUMNS'), client.indexOf('const LEDGER_ENTRY_CSV_COLUMNS'))
+    expect(colBlock).not.toMatch(/width:\s*'\d+%'/)
+  })
+
+  it('★★ 列宽总计必须 ≈ 912px（960 弹窗 − 左右内边距），给模型列留足余量', () => {
+    const colBlock = client.slice(client.indexOf('const LEDGER_ENTRY_COLUMNS'), client.indexOf('const LEDGER_ENTRY_CSV_COLUMNS'))
+    const fixed = [...colBlock.matchAll(/width:\s*'(\d+)px'/g)].map((m) => Number(m[1]))
+    // 8 列固定（model 是 auto）+ 列数校验：少一列说明有人删了列。
+    expect(fixed).toHaveLength(8)
+    const sum = fixed.reduce((a, b) => a + b, 0)
+    // 固定列合计必须 < 912，余量是模型列的（实测需要 199.3px）。
+    expect(sum).toBeLessThan(912)
+    expect(912 - sum, '模型列剩余宽度必须大于实测最长串 199.3px').toBeGreaterThan(199.3)
+  })
+
+  it('★ 窄屏必须横向滚动，不许压缩各列（9 列固定宽必然超宽）', () => {
+    expect(styles).toMatch(/\.dim-jh-ledgerTableScroll\s*\{[^}]*overflow-x:\s*auto/)
+    // 渲染层也必须有这个容器，否则样式挂不上去。
+    expect(client).toMatch(/className: 'dim-jh-ledgerTableScroll'/)
+  })
+
+  it('★ 模型格的 title 挂完整串（窄屏省略号截断时靠悬停看全）', () => {
+    expect(client).toMatch(/title:\s*ledgerEntryModelText\(entry\)/)
   })
 })

@@ -168,6 +168,7 @@ import {
   historyTitle,
   HISTORY_RANGES,
   ledgerSubtitle,
+  ledgerEntryModelText,
   rangeDaysOf,
   tokenSummaryText,
   tokenSummaryTooltip,
@@ -2728,26 +2729,41 @@ function downloadCsv(filename, headers, rows) {
  * 账号列刻意给得比模型列窄：名字是给人认人的短标签，模型名才是这一行的主要信息。
  */
 const LEDGER_ENTRY_COLUMNS = Object.freeze([
-  Object.freeze({ key: 'time', label: '时间', title: '请求发起时刻（本地时间）；悬停看完整日期', width: '10%' }),
-  Object.freeze({ key: 'channel', label: '渠道', title: '直连 = DSH 宿主对话；网关 = OpenAI 兼容网关', width: '8%' }),
+  Object.freeze({ key: 'time', label: '时间', title: '请求发起时刻（本地时间）；悬停看完整日期', width: '62px' }),
+  Object.freeze({ key: 'channel', label: '渠道', title: '直连 = DSH 宿主对话；网关 = OpenAI 兼容网关', width: '46px' }),
   Object.freeze({
     key: 'account',
     label: '账号',
     title: '服务本笔请求的账号：优先显示备注名（nickname），其次上游用户名（accountName）；'
       + '两者都取不到时显示内部 id（悬停可看完整 id）。账本不存名字，名字由各账号的凭据现读。',
-    width: '14%',
+    width: '172px',
   }),
-  Object.freeze({ key: 'model', label: '模型', title: '请求里 wire 上的模型 id', width: '20%' }),
+  Object.freeze({
+    key: 'model',
+    label: '模型',
+    title: 'provider/模型（与上游其它处的写法一致）。完整 id 一行显示；窄屏可横向滚动。',
+    /**
+     * ⚠️ 模型列**吃掉剩余宽度**（`auto`），不给固定像素。
+     *
+     * 实测（960px 弹窗、11.5px 字体）：最长组合
+     *   workbuddy/deepseek-v4.1-flash-free = 187.3px（+12 内边距 = 199.3px）
+     * 而其余 8 列实际只需 62+46+172+104+58+86+58+60 = 646px。912 − 646 = 266px。
+     * ⇒ 给 `auto` 时模型列拿到 266px，余量 67px；给死 200px 则会**截断**（差 7.5px）。
+     * ⚠️ 别改成固定百分比 —— 那正是改前「时间 10%/渠道 8% 各浪费 50px、
+     *    模型只拿到 182px 而放不下」的病根（用户 2026-11-11 报障）。
+     */
+    width: 'auto',
+  }),
   Object.freeze({
     key: 'tokens',
     label: 'TOKEN',
     title: '总处理量 = 未命中缓存输入 + 缓存命中输入 + 输出；缓存写入单列展示，不重复计入总量',
-    width: '12%',
+    width: '104px',
   }),
-  Object.freeze({ key: 'ttft', label: '首字', title: '首个内容块的耗时；没有内容帧时显示 —', width: '8%' }),
-  Object.freeze({ key: 'tps', label: '速率', title: '输出 token / 解码时长；解码不足 100ms 时不测', width: '10%' }),
-  Object.freeze({ key: 'duration', label: '耗时', title: '整笔请求的总耗时', width: '8%' }),
-  Object.freeze({ key: 'status', label: '状态', title: '成功 / 失败（悬停看失败原因）', width: '10%' }),
+  Object.freeze({ key: 'ttft', label: '首字', title: '首个内容块的耗时；没有内容帧时显示 —', width: '58px' }),
+  Object.freeze({ key: 'tps', label: '速率', title: '输出 token / 解码时长；解码不足 100ms 时不测', width: '86px' }),
+  Object.freeze({ key: 'duration', label: '耗时', title: '整笔请求的总耗时', width: '58px' }),
+  Object.freeze({ key: 'status', label: '状态', title: '成功 / 失败（悬停看失败原因）', width: '60px' }),
 ]);
 
 /** 「最近请求」CSV 导出的列头 —— 与 {@link LEDGER_ENTRY_COLUMNS} 同序，账号列同位置。 */
@@ -2755,6 +2771,12 @@ const LEDGER_ENTRY_CSV_COLUMNS = Object.freeze([
   '时间', '渠道', '账号', '模型', '状态', '总处理量', '输入', '输出', '缓存命中', '缓存写入', '推理',
   '首字毫秒', '输出tok每秒', '耗时毫秒', '错误',
 ]);
+
+/**
+ * 模型格的取值口径在 `./token-ledger-panel.js` 的 `ledgerEntryModelText` ——
+ * 它是纯函数，放在那边才能被单测直接导入（本文件依赖 react，单测环境没有）。
+ * 这里只负责把它接进渲染与导出。
+ */
 
 function TokenLedgerPanel({ rpcCall, onClose }) {
   const mounted = React.useRef(true);
@@ -3082,12 +3104,14 @@ function TokenLedgerPanel({ rpcCall, onClose }) {
    * 用户会拿导出去核对界面，两处顺序一错就等于两份互相矛盾的报表。
    * 账号列导出的是**显示名**（与界面一致），不是内部 id：内部 id 对 Excel 里的人
    * 没有意义，而界面上认的就是这个名字。
+   * 模型列同理导出 `provider/model`（与界面同一份实现 `ledgerEntryModelText`），
+   * 否则「界面写着 workbuddy/xxx、CSV 里只有 xxx」又是一处自相矛盾。
    */
   const exportEntries = () => downloadCsv('token-usage-details.csv',
     [...LEDGER_ENTRY_CSV_COLUMNS],
     visibleEntries.map((entry) => [
       Number.isFinite(entry.ts) ? new Date(entry.ts).toISOString() : '', channelLabel(entry.channel),
-      accountLabel(entry.accountId, accountNames), entry.model,
+      accountLabel(entry.accountId, accountNames), ledgerEntryModelText(entry),
       entry.error === undefined ? '成功' : '失败',
       // ⚠️ 未收到 usage 的失败行导出**空串**而非 0：界面用 `—` 与真实的 0 严格区分
       //（见 token-ledger.ts 的「0 会被读成瞬间完成、没花 token」注释），
@@ -3142,6 +3166,10 @@ function TokenLedgerPanel({ rpcCall, onClose }) {
     if (visibleEntries.length === 0) return React.createElement('div', { key: 'entries' }, toolbar,
       React.createElement('div', { className: 'dim-jh-empty' }, '没有符合当前筛选条件的请求。'));
     return React.createElement('div', { key: 'entries' }, toolbar,
+      // ⚠️ 明细表包在**滚动容器**里：9 列是固定像素宽（合计约 912px），
+      //    窄屏放不下时横向滚动而不是压缩各列 —— 压缩会把 9 列一起挤变形
+      //    （数字列对不齐、模型名断成三行），比横向滚动更糟。
+      React.createElement('div', { className: 'dim-jh-ledgerTableScroll' },
       React.createElement('table', { className: 'dim-jh-ledgerTable' },
       // ⚠️ `table-layout: fixed` 下必须有列宽，否则 9 列等分把模型名压成三行
       //（8 列时勉强够，加一列就崩）。列宽与表头同源（`LEDGER_ENTRY_COLUMNS`）。
@@ -3168,7 +3196,12 @@ function TokenLedgerPanel({ rpcCall, onClose }) {
           className: 'dim-jh-ledgerEntryAccount',
           title: typeof entry.accountId === 'string' && entry.accountId.length > 0 ? entry.accountId : '未归属账号',
         }, accountLabel(entry.accountId, accountNames)),
-        React.createElement('td', { className: 'dim-jh-ledgerEntryModel' }, entry.model),
+        // ⚠️ 模型格显示 `provider/model`（用户 2026-11-11 要求，见 ledgerEntryModelText）。
+        //    `title` 挂完整串：窄屏下模型列可能被省略号截断，悬停要能看全。
+        React.createElement('td', {
+          className: 'dim-jh-ledgerEntryModel',
+          title: ledgerEntryModelText(entry),
+        }, ledgerEntryModelText(entry)),
         React.createElement('td', { title: tokenSummaryTooltip(entry) }, entryTokenText(entry)),
         React.createElement('td', null, formatTtft(entry)),
         React.createElement('td', null, formatTps(entry)),
@@ -3177,7 +3210,7 @@ function TokenLedgerPanel({ rpcCall, onClose }) {
           className: entry.error !== undefined ? 'dim-jh-ledgerError' : 'dim-jh-ledgerSuccess',
           title: entry.error !== undefined ? entry.error : '请求成功',
           'aria-label': entry.error !== undefined ? '失败详情：' + entry.error : '请求成功',
-        }, entry.error !== undefined ? '失败 ⓘ' : '成功 ✓'))))),
+        }, entry.error !== undefined ? '失败 ⓘ' : '成功 ✓')))))),
       React.createElement('div', { className: 'dim-jh-ledgerPagination' },
         React.createElement('span', null, `第 ${safeEntryPage} / ${entryPageCount} 页，每页 50 条`),
         React.createElement('button', {

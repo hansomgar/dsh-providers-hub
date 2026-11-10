@@ -341,6 +341,29 @@ describe('★ Token 面板按账号归档 · 接线层行为守卫', () => {
     expect(cellTexts).not.toContain('qodercn-c5a414d5')
   })
 
+  it('★★★ 明细表的模型格显示 provider/模型（不是裸模型 id）', async () => {
+    const { rpcCall } = makeRpc()
+    await renderPanel(rpcCall)
+    const cells = findAll((node) => node.props?.className === 'dim-jh-ledgerEntryModel')
+    const cellTexts = cells.map((node) => textsIn([node]).join(''))
+    // 四笔明细：qodercn×2 / workbuddy×2
+    expect(cellTexts).toContain('qodercn/dfmodel')
+    expect(cellTexts).toContain('qodercn/qmodel_38max')
+    expect(cellTexts).toContain('workbuddy/deepseek-v4.1-flash')
+    // ⚠️ 反向：裸模型名**不得**单独出现（那就是本需求未实现）
+    expect(cellTexts).not.toContain('dfmodel')
+    expect(cellTexts).not.toContain('qmodel_38max')
+    // title 挂完整串（窄屏省略号截断时靠悬停看全）
+    const titles = cells.map((node) => node.props?.title)
+    expect(titles).toContain('qodercn/dfmodel')
+  })
+
+  it('★★ 明细表包在横向滚动容器里（9 列固定宽，窄屏放不下）', async () => {
+    const { rpcCall } = makeRpc()
+    await renderPanel(rpcCall)
+    expect(findAll((node) => node.props?.className === 'dim-jh-ledgerTableScroll')).toHaveLength(1)
+  })
+
   it('★ account.list 失败必须静默：面板照常显示，账号回落 id', async () => {
     const calls: string[] = []
     const rpcCall = async (method: string, payload?: unknown): Promise<unknown> => {
