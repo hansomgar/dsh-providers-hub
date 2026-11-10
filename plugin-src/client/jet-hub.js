@@ -3327,13 +3327,18 @@ function TokenLedgerPanel({ rpcCall, onClose }) {
         perfCell(channelRow.totals),
         React.createElement('span', { className: 'dim-jh-ledgerProviderSum', title: tokenSummaryTooltip(channelRow.totals) },
           tokenSummaryText(channelRow.totals))),
+      // ⚠️⚠️ provider 行**必须**用 `dim-jh-ledgerProvider`：这里原先写的是
+      //    `dim-jh-ledgerAccount`，于是 `buddy` / `qodercn` 这些**供应商**被套上了
+      //    账号行的色块样式，界面上看起来「provider 变成了账号」（用户 2026-11-11 报障）。
+      //    实时汇总卡那边一直是对的，只有历史日树写错了 —— 两处各写一份类名正是
+      //    这次分叉的来源，改样式时**两边一起核对**。
       channelRow.providers.map((providerRow) => React.createElement('div', {
-        key: providerRow.provider, className: 'dim-jh-ledgerAccount',
+        key: providerRow.provider, className: 'dim-jh-ledgerProvider',
       },
-        React.createElement('div', { className: 'dim-jh-ledgerAccountHead' },
-          React.createElement('span', { className: 'dim-jh-ledgerAccountName' }, providerRow.provider),
+        React.createElement('div', { className: 'dim-jh-ledgerProviderHead' },
+          React.createElement('span', { className: 'dim-jh-ledgerProviderName' }, providerRow.provider),
           perfCell(providerRow.totals),
-          React.createElement('span', { className: 'dim-jh-ledgerAccountSum', title: tokenSummaryTooltip(providerRow.totals) },
+          React.createElement('span', { className: 'dim-jh-ledgerProviderSum', title: tokenSummaryTooltip(providerRow.totals) },
             tokenSummaryText(providerRow.totals))),
         // ⚠️ 与实时汇总卡**同一条判据**：账号层一律渲染（单账号也分层），0 个账号
         //    给空数组。历史日树原先还是「>1 才分层」，与改后的实时卡分叉 —— 同一天
