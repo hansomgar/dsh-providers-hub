@@ -3,6 +3,7 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { build } from 'esbuild';
 import { assertRegistrationIdFromFiles, readRegisteredId } from './registration-id-check.mjs';
+import { checkHookTdz } from './hook-tdz-check.mjs';
 
 const sourceDirectory = dirname(fileURLToPath(import.meta.url));
 const packageRoot = resolve(sourceDirectory, '../..');
@@ -36,6 +37,39 @@ if (typeof loaderId !== 'string' || loaderId.length === 0) {
  * 接线断言抓住（审计 F3 的变异正是把条件改成 `if (false)`，当时 21/21 全绿）。
  */
 assertRegistrationIdFromFiles({ rootDir: packageRoot });
+
+/**
+ * ⚠️⚠️ **安装期闸门 #2：hook 依赖数组的 TDZ 风险**（真实缺陷，2026-11-10）。
+ *
+ * ## 事故
+ *
+ * 真机首启报 `Cannot access 'loadPreferredAccount' before initialization`，
+ * 整枚用量徽标被错误边界接住、显示「用量徽标渲染失败」。
+ *
+ * 根因：`useEffect(() => {...}, [dep])` 的**依赖数组在每次渲染时立即求值**，
+ * 而 `const dep = useCallback(...)` 在求值到那一行之前处于 TDZ ⇒
+ * 引用写在声明前面**必抛**。
+ *
+ * ## 为什么闸门必须在这里（而不是只写单测）
+ *
+ * `pnpm add git+…` 走的是 `prepare → build:all`，**不跑 vitest** ——
+ * 只有能在本文件里跑的断言才在安装路径上生效。而 TDZ 是**求值顺序**问题，
+ * 源码文本断言挡不住（定义与引用**都在**源码里，只有执行顺序错了才抛）。
+ *
+ * ⚠️ 与上面那道闸门同款：**顶层无条件调用**，没有 `if` 可以短路。
+ */
+const tdzReport = checkHookTdz({ rootDir: packageRoot });
+if (tdzReport.problems.length > 0) {
+  const lines = tdzReport.problems.map(
+    (p) => `  ${p.file}:${p.hookLine} ${p.hook} 依赖 "${p.dep}"，`
+      + `但其 const 声明在 L${p.declLine}（更靠后，同缩进）`,
+  );
+  throw new Error(
+    '客户端存在 hook 依赖的 TDZ 风险（渲染时会抛 before initialization 一类错误）：\n'
+    + lines.join('\n')
+    + '\n修法：把该 hook 移到依赖变量声明之后。',
+  );
+}
 
 const result = await build({
   entryPoints: [resolve(sourceDirectory, 'index.js')],

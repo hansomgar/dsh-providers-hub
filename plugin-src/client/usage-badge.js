@@ -740,16 +740,12 @@ function UsageBadgeActive(props) {
     setCreditsExpanded(false);
   }, [provider]);
 
-  /**
-   * 「优先帐号」的加载时机：**挂载 / 换渠道 / 换会话**时各读一次。
-   *
-   * ⚠️ 与上面那个 60s 轮询分开：偏好是**用户自己的选择**，不会在服务端被动变化
-   * （唯一变化源就是用户在这里点），故无需轮询 —— 轮询只会在写入后把刚选的值
-   * 用旧快照盖回去（竞态）。
-   */
-  React.useEffect(() => {
-    void loadPreferredAccount();
-  }, [loadPreferredAccount]);
+  /* 「优先帐号」的加载 effect 被**移到了 `onPickPreferredAccount` 之后** ——
+     它依赖 `loadPreferredAccount`，而 `const` 在声明求值前处于 TDZ，
+     `useEffect` 的依赖数组却是每次渲染立即求值 ⇒ 写在前面必抛
+     `Cannot access 'loadPreferredAccount' before initialization`
+     （真实缺陷，2026-11-10 真机首启复现：整枚徽标被错误边界接住）。
+     见下方 `preferredAccountLoadEffect()` 的说明。 */
 
   React.useEffect(() => {
     let alive = true;
@@ -1047,6 +1043,33 @@ function UsageBadgeActive(props) {
       setPrefAccountBusy(false);
     }
   };
+
+  /**
+   * 「优先帐号」的加载时机：**挂载 / 换渠道 / 换会话**时各读一次。
+   *
+   * ## ⚠️⚠️ 本 effect 的位置是有意的，不要往上挪
+   *
+   * 它的依赖数组 `[loadPreferredAccount]` 在**每次渲染时立即求值**，而
+   * `loadPreferredAccount` 是同一函数作用域里的 `const` ⇒ 在声明求值到那一行
+   * 之前引用它，会抛：
+   *
+   * ```
+   * Cannot access 'loadPreferredAccount' before initialization
+   * ```
+   *
+   * 真实缺陷（2026-11-10 真机首启复现）：我把本 effect 写在 `useCallback` **之前**，
+   * 徽标整枚被错误边界接住，面板报「用量徽标渲染失败」。
+   * ⇒ 它必须位于 `loadPreferredAccount` 与 `onPickPreferredAccount`
+   * **两者之后**（后者内部也调它）。
+   *
+   * ## 为什么与 60s 轮询分开
+   *
+   * 偏好是**用户自己的选择**，唯一变化源就是用户在这里点，不会在服务端被动变化
+   * ⇒ 无需轮询；而轮询反而会在写入后把刚选的值用旧快照盖回去（竞态）。
+   */
+  React.useEffect(() => {
+    void loadPreferredAccount();
+  }, [loadPreferredAccount]);
 
   /**
    * 一键签到 —— **只签当前渠道**（单次 `credits.claimAll({ provider })`）。
