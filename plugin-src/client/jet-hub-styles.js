@@ -997,36 +997,73 @@ const STYLES = `
 .dim-jh-ledgerCardSum { margin-left: auto; font-size: 11.5px; line-height: 17px; font-variant-numeric: tabular-nums; color: var(--dsw-alias-label-secondary, #4e5969); white-space: nowrap; }
 .dim-jh-ledgerProvider { padding: 4px 10px 6px; }
 .dim-jh-ledgerProvider + .dim-jh-ledgerProvider { border-top: .5px solid var(--dsw-alias-border-l3, #eef0f3); }
-/* 账号层：**一律渲染**（单账号也分层，2026-11-10 用户决策 Q3）。
-   ⚠️ 2026-11-11 用户报障「账号跟模型区分度不高、账号不够显眼」——
-   根因是两层**字号相同（都 11.5px）、颜色相同（都 label-secondary）**，只靠
-   600 字重与等宽字体族区分 ⇒ 读起来是「四行平铺」，看不出谁是分组头。
-   修法（方案 A）：把账号行**升成分组头** —— 浅底色块 + 左侧品牌色条 + 12px
-   主文字色；模型行保持不动（压小会牺牲 deepseek-v4.1-flash 这类长名的可读性）。 */
-.dim-jh-ledgerAccount { min-width: 0; }
+/* ══════════════════════════════════════════════════════════════════════════
+   用量树的三层视觉语言（2026-11-11 定稿，用户从 4 个方案里选的「方案 3 + 档位 D」）
+
+   provider（容器级）→ 账号（分组头）→ 模型（内容），三层同时靠三种手段拉开：
+   ① 底色：淡色块 → 浓色块 → 无底色
+   ② 缩进：0 → 30px → 54px
+   ③ 字号/颜色：11.5px 粗体 → 12px 主文字 → 11px 最暗
+
+   ⚠️⚠️ 两个真实报障（2026-11-11）必须记住：
+
+   1. 色条曾经是白的 —— 我原先用 --dsw-alias-brand-primary，但它在 DSH 的深色主题下
+      等于 --dsw-static-neutral-bluish-50 = #f9fafb（近白）。它是反色/对比色（给
+      「深色按钮上的白字」用），不是蓝色。真正的蓝色品牌色是
+      --dsw-static-deepseek-450 = #5686fe。CSS 里写了 #1677ff 回退值也没用 ——
+      变量存在时回退值永远不生效，所以肉眼看到的是白条。
+      ⚠️ 别再改成 brand-primary；要用蓝就写 --dsw-static-deepseek-450。
+
+   2. provider 曾被画成账号 —— 历史日树的 provider 行写的是
+      className: 'dim-jh-ledgerAccount'（实时卡那边一直是对的）。两个类名撞车后，
+      账号的色块样式直接把 buddy / qodercn 染成了账号。现已改为
+      dim-jh-ledgerProvider，两处类名必须各自独立。
+
+   ⚠️ 本文件用模板字符串承载 CSS：注释里写反引号会提前闭合、esbuild 直接报错
+      （本次已踩过三次，由 token-ledger-panel.spec.ts 的闸门兜住）。
+   ══════════════════════════════════════════════════════════════════════════ */
+
+/* ── 第一层：provider（容器级）—— 缩进 0 ──
+   淡色块 + 左侧 3px 灰色竖线 + 11.5px 粗体。
+   ⚠️ 色块用 color-mix 做半透明：不引入新颜色，自动跟随主题明暗；
+      老浏览器无 color-mix 时回退到 bg-layer-2（有底色但更淡，层级不塌）。 */
+.dim-jh-ledgerProviderHead {
+  display: flex; align-items: baseline; gap: 8px;
+  margin: 2px 0 3px; padding: 5px 8px; border-radius: 6px;
+  background: var(--dsw-alias-bg-layer-2, #f7f8fa);
+  background: color-mix(in srgb, var(--dsw-alias-bg-layer-3, #2a2b2f) 58%, transparent);
+  border-left: 3px solid var(--dsw-alias-border-l2, #d0d3d9);
+}
+.dim-jh-ledgerProviderName { min-width: 0; font-size: 11.5px; line-height: 17px; font-weight: 700; color: var(--dsw-alias-label-primary, #1f2329); overflow-wrap: anywhere; }
+.dim-jh-ledgerProviderSum { margin-left: auto; flex: none; font-size: 11px; line-height: 16px; font-variant-numeric: tabular-nums; color: var(--dsw-alias-label-tertiary, #8f959e); white-space: nowrap; }
+
+/* ── 第二层：账号（分组头）—— 缩进 30px ──
+   ⚠️ 单账号与多账号样式完全一致（用户 2026-11-11 决策）：层级由色块与缩进表达，
+   不由账号数表达。原先的 data-single 分支已删除，不要再加回来。 */
+.dim-jh-ledgerAccount { min-width: 0; margin-left: 30px; }
 .dim-jh-ledgerAccount + .dim-jh-ledgerAccount { border-top: .5px dashed var(--dsw-alias-border-l3, #eef0f3); }
 .dim-jh-ledgerAccountHead {
   display: flex; align-items: baseline; gap: 8px;
-  /* 色块要**跨满整行**（含账户小计那侧），故横向负边距吃掉父级 padding 的一半；
-     这样色块与 provider 头的左缘对齐，而不是缩成一小截。 */
-  margin: 4px 0 3px; padding: 5px 8px; border-radius: 6px;
+  margin: 3px 0 2px; padding: 5px 8px; border-radius: 6px;
   background: var(--dsw-alias-bg-layer-3, #2a2b2f);
-  border-left: 3px solid var(--dsw-alias-brand-primary, #1677ff);
+  /* ⚠️ 必须是 deepseek-450（真蓝），不是 brand-primary（深色主题下是近白）。 */
+  border-left: 3px solid var(--dsw-static-deepseek-450, #5686fe);
 }
-/* 单账号与多账号**样式完全一致**（用户 2026-11-11 决策：不因账号数改变观感）。
-   ⚠️ 但单账号的 provider 下面只有「账号 + 唯一模型」，色块若再缩进会与 provider
-   头错开 ⇒ 两种情形都不额外缩进，靠色块本身表达层级。 */
 .dim-jh-ledgerAccountName {
   min-width: 0; font-size: 12px; line-height: 18px; font-weight: 600;
   color: var(--dsw-alias-label-primary, #1f2329); overflow-wrap: anywhere;
 }
 .dim-jh-ledgerAccountSum { margin-left: auto; flex: none; font-size: 11px; line-height: 16px; font-variant-numeric: tabular-nums; color: var(--dsw-alias-label-tertiary, #8f959e); white-space: nowrap; }
-.dim-jh-ledgerProviderHead { display: flex; align-items: baseline; gap: 8px; padding: 4px 0 2px; }
-.dim-jh-ledgerProviderName { min-width: 0; font-size: 12px; line-height: 18px; font-weight: 600; color: var(--dsw-alias-label-primary, #1f2329); overflow-wrap: anywhere; }
-.dim-jh-ledgerProviderSum { margin-left: auto; flex: none; font-size: 11px; line-height: 16px; font-variant-numeric: tabular-nums; color: var(--dsw-alias-label-tertiary, #8f959e); white-space: nowrap; }
-/* 模型行：账号色块之内，**再缩进一点**（比色块内容区多 4px）表示「从属于上面的账号」。 */
-.dim-jh-ledgerModel { display: flex; align-items: baseline; gap: 8px; min-width: 0; padding: 2px 0 2px 14px; }
-.dim-jh-ledgerModelName { flex: 1 1 auto; min-width: 0; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px; line-height: 17px; color: var(--dsw-alias-label-secondary, #4e5969); overflow-wrap: anywhere; }
+
+/* ── 第三层：模型（内容）—— 缩进 54px，最暗最小，带 ↳ 前导 ──
+   ⚠️ ↳ 用 ::before 而不是塞进文本节点：它是纯装饰，不该被复制/导出/读屏念出来
+      （CSV 导出与 accountLabel 都不该看到它）。 */
+.dim-jh-ledgerModel { display: flex; align-items: baseline; gap: 8px; min-width: 0; padding: 2px 0 2px 54px; }
+.dim-jh-ledgerModel::before {
+  content: "↳"; flex: none; font-size: 10.5px; line-height: 15px;
+  color: var(--dsw-alias-label-tertiary, #8f959e); opacity: .7;
+}
+.dim-jh-ledgerModelName { flex: 1 1 auto; min-width: 0; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; line-height: 16px; color: var(--dsw-alias-label-tertiary, #8f959e); overflow-wrap: anywhere; }
 .dim-jh-ledgerModelReq { flex: none; font-size: 11px; line-height: 16px; font-variant-numeric: tabular-nums; color: var(--dsw-alias-label-tertiary, #8f959e); white-space: nowrap; }
 .dim-jh-ledgerModelTokens { flex: none; font-size: 11.5px; line-height: 17px; font-variant-numeric: tabular-nums; color: var(--dsw-alias-label-primary, #1f2329); white-space: nowrap; }
 /* 均值格（首字 · 速率）：三级汇总行（渠道/账号/模型）共用，等宽数字对齐。 */
@@ -1082,6 +1119,11 @@ const STYLES = `
   .dim-jh-ledgerTable th, .dim-jh-ledgerTable td { padding: 3px 2px; overflow-wrap: anywhere; }
   /* 窄屏 9 列：账号列再收窄，其余列让位（模型列本来就允许换行）。 */
   .dim-jh-ledgerTable .dim-jh-ledgerEntryAccount { max-width: 72px; }
+  /* ⚠️ 窄屏必须收窄三层缩进：宽屏的 30/54px 在 <700px 时会把模型名
+     （deepseek-v4.1-flash 这类长名）挤成三行、把行高撑乱。
+     缩进减半后层级仍然看得出来（14/26px 相对 0 仍然错开），只是不再浪费宽度。 */
+  .dim-jh-ledgerAccount { margin-left: 14px; }
+  .dim-jh-ledgerModel { padding: 2px 0 2px 26px; }
 }
 
 /* ── 模型列表的「计费/来源」分组（订阅 / 免费 / Cline Cloud / 按量计费）──

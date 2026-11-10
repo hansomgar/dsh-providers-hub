@@ -407,54 +407,121 @@ describe('用量热力图 · 渲染接线与样式契约', () => {
 })
 
 /**
- * 账号层与模型层的**视觉区分度契约**（2026-11-11 用户报障）。
+ * 用量树的**三层视觉契约**（2026-11-11 两轮报障的终稿）。
  *
- * 症状：账号行与模型行「区分度不高、账号不够显眼」。根因是**两层字号与颜色完全
- * 相同**（都 11.5px / 都 `--dsw-alias-label-secondary`），只靠 600 字重与等宽字体族
- * 区分 ⇒ 读起来是「四行平铺」，看不出谁是分组头。
+ * ## 第一轮：账号与模型区分度不足
+ * 根因是两层**字号与颜色完全相同**（都 11.5px / 都 `--dsw-alias-label-secondary`），
+ * 只靠 600 字重与等宽字体族区分 ⇒ 读起来是「四行平铺」。
  *
- * 修法（方案 A，用户选定）：账号行升为**色块分组头** —— 浅底 + 左侧品牌色条 +
- * 12px 主文字色；模型行保持不动（压小会牺牲长模型名的可读性）。
+ * ## 第二轮：① 色条是白的 ② provider 被画成账号
+ * - ① 我用了 `--dsw-alias-brand-primary`，而它在 DSH 深色主题下 =
+ *   `--dsw-static-neutral-bluish-50` = **#f9fafb（近白）**。它是反色/对比色，
+ *   不是蓝色；真正的蓝是 `--dsw-static-deepseek-450` = #5686fe。
+ *   ⚠️ 写了 `#1677ff` 回退值也没用 —— **变量存在时回退值永不生效**。
+ * - ② 历史日树的 provider 行错用了 `dim-jh-ledgerAccount` 类名 ⇒ 供应商被染成账号。
  *
- * ⚠️ 这些断言是**数值级**的，不是「有没有某个类名」：
- * 类名在、但字号/颜色又改回与模型行相同，正是本缺陷复发的形态。
+ * ## 终稿（用户选定「方案 3 + 档位 D」）
+ * provider（0px 缩进 / 淡色块 / 灰竖线 / 11.5px 粗体）
+ *   → 账号（30px / 浓色块 / 蓝条 / 12px 主色）
+ *   → 模型（54px / 无底色 / 11px 最暗 / ↳ 前导）
+ *
+ * ⚠️ 断言是**数值级**的，不是「有没有某个类名」：类名在、但字号/颜色/缩进改回
+ * 相同值，正是这些缺陷复发的形态。
  */
-describe('账号层视觉层级（方案 A）', () => {
+describe('用量树三层视觉契约（provider / 账号 / 模型）', () => {
   const styles = readFileSync(resolve(here, '../../plugin-src/client/jet-hub-styles.js'), 'utf8')
 
-  /** 取出某个选择器的声明块（只认 `{ … }`，不做嵌套解析）。 */
+  /** 取出某个选择器的**第一条**声明块（只认 `{ … }`，不做嵌套解析）。 */
   const ruleOf = (selector: string): string => {
     const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
     const m = styles.match(new RegExp(`${escaped}\\s*\\{([^}]*)\\}`, 's'))
     return m?.[1] ?? ''
   }
 
-  it('★ 账号头必须是「色块分组头」：底色 + 左侧色条 + 圆角', () => {
-    const head = ruleOf('.dim-jh-ledgerAccountHead')
-    expect(head, '找不到 .dim-jh-ledgerAccountHead 规则').not.toBe('')
-    // 底色块（分组头的核心视觉）
-    expect(head).toMatch(/background:\s*var\(--dsw-alias-bg-layer-3/)
-    // 左侧品牌色条（「这是标题」的信号）
-    expect(head).toMatch(/border-left:\s*3px\s+solid\s+var\(--dsw-alias-brand-primary/)
-    // 圆角，避免色块看起来像一块贴歪的矩形
-    expect(head).toMatch(/border-radius:\s*6px/)
+  it('★ 第一层 provider：淡色块 + 灰色竖线 + 11.5px 粗体，且不缩进', () => {
+    const head = ruleOf('.dim-jh-ledgerProviderHead')
+    expect(head, '找不到 .dim-jh-ledgerProviderHead 规则').not.toBe('')
+    // 淡色块（color-mix 半透明，自动跟随主题明暗）
+    expect(head).toMatch(/color-mix\(in srgb,\s*var\(--dsw-alias-bg-layer-3/)
+    // 左侧 3px 灰色竖线 = 「容器级」
+    expect(head).toMatch(/border-left:\s*3px\s+solid\s+var\(--dsw-alias-border-l2/)
+    // 粗体，「标题」的信号
+    expect(ruleOf('.dim-jh-ledgerProviderName')).toMatch(/font-weight:\s*700/)
+    // ⚠️ provider 是容器级，**不许**有左缩进（它是最外层）。
+    //    判据必须同时认 `padding-left` **与四值简写** `padding: a b c d` ——
+    //    只查 `padding-left` 时，写成 `padding: 4px 10px 6px 20px` 的变异**无牙**
+    //    （2026-11-11 变异验证实测抓到的假守卫）。
+    //    ⚠️ 但没有左缩进 ≠ 左内边距为 0：现有规则是 `padding: 4px 10px 6px`
+    //    （三值 = 上 8 横 下），左边距就是那个 `10px`，是**有意的**（与卡片内缘对齐）。
+    //    真正要守的是「provider 不被推得比账号更靠右」—— 见下面与账号缩进的比较。
+    const providerRule = ruleOf('.dim-jh-ledgerProvider')
+    expect(providerRule).not.toMatch(/padding-left:\s*[1-9]/)
+    const shorthand = providerRule.match(/padding:\s*([^;]+);/)?.[1] ?? ''
+    const parts = shorthand.trim().split(/\s+/).filter((p) => p.length > 0)
+    // 四值简写的第 4 个是左；三值/两值时第 2 个是左；单值时全是
+    const leftPad = parts.length === 4 ? parts[3] : (parts.length >= 2 ? parts[1] : parts[0])
+    const providerLeft = Number.parseFloat(leftPad ?? '0') || 0
+    // ⚠️ 核心不变式：provider 的**有效左偏移必须严格小于账号的**。
+    //    账号有 30px 的 `margin-left` ⇒ provider 的左内边距（10px）远小于它。
+    //    给 provider 加到 ≥ 20px 就会与账号齐平/超出，层级塌掉 ⇒ 这条必须红。
+    //    ⚠️ 判据用「左内边距」而不是「总偏移」，因为两者是不同层级的量：
+    //    账号的 30px 是 margin，provider 的 10px 是 padding，比的是**视觉左缘**。
+    const accountLeft = Number.parseFloat(
+      ruleOf('.dim-jh-ledgerAccount').match(/margin-left:\s*([^;]+);/)?.[1] ?? '0',
+    ) || 0
+    expect(providerLeft, 'provider 的左内边距必须明显小于账号缩进，否则不再是容器级')
+      .toBeLessThan(accountLeft / 2)
   })
 
-  it('★★ 账号名必须与模型名**不同级**：字号更大 + 颜色更高一档', () => {
+  it('★★★ 第二层账号：蓝条必须是 deepseek-450（真蓝），**绝不能**是 brand-primary', () => {
+    const head = ruleOf('.dim-jh-ledgerAccountHead')
+    expect(head, '找不到 .dim-jh-ledgerAccountHead 规则').not.toBe('')
+
+    // ① 必须是真正的蓝色变量
+    expect(head).toMatch(/border-left:\s*3px\s+solid\s+var\(--dsw-static-deepseek-450/)
+    // ②⚠️⚠️ 回归守卫：品牌色 brand-primary 在深色主题下是 #f9fafb（近白）——
+    //    用它画出来的就是一条白条（真实报障）。这条断言是那次 bug 的墓碑。
+    expect(head).not.toMatch(/border-left:[^;]*--dsw-alias-brand-primary/)
+    // ③ 退一步：整个账号头里都不该出现 brand-primary（它可能被挪到别处再犯）
+    expect(head).not.toContain('--dsw-alias-brand-primary')
+    // ④ 浓色块（层级高于 provider 的淡色块）
+    expect(head).toMatch(/background:\s*var\(--dsw-alias-bg-layer-3/)
+  })
+
+  it('★★★ 三层缩进必须递增：provider 0 < 账号 30 < 模型 54（档位 D）', () => {
+    const indentOf = (block: string, prop: string): number | null => {
+      const m = block.match(new RegExp(`${prop}:\\s*([^;]+);`))
+      if (m === null) return 0 // 没写 = 0
+      const v = Number.parseFloat(m[1]!)
+      return Number.isFinite(v) ? v : 0
+    }
+    const account = indentOf(ruleOf('.dim-jh-ledgerAccount'), 'margin-left')
+    // `.dim-jh-ledgerModel` 的 padding 是四值简写，取第 4 个（左）
+    const modelPad = ruleOf('.dim-jh-ledgerModel').match(/padding:\s*([^;]+);/)?.[1] ?? ''
+    const model = Number.parseFloat(modelPad.split(/\s+/)[3] ?? '0')
+
+    expect(account, '账号缩进必须是 30px（档位 D）').toBe(30)
+    expect(model, '模型缩进必须是 54px（档位 D）').toBe(54)
+    // ⚠️ 核心不变式：三层必须**严格递增**，否则层级又糊了
+    expect(account).toBeGreaterThan(0)
+    expect(model).toBeGreaterThan(account)
+  })
+
+  it('★★ 账号名与模型名不同级：字号更大 + 颜色更高一档', () => {
     const acct = ruleOf('.dim-jh-ledgerAccountName')
     const model = ruleOf('.dim-jh-ledgerModelName')
     expect(acct, '找不到 .dim-jh-ledgerAccountName 规则').not.toBe('')
     expect(model, '找不到 .dim-jh-ledgerModelName 规则').not.toBe('')
 
-    // ① 字号：账号 12px，模型 11.5px（相同就是本缺陷的原形态）
+    // ① 字号：账号 12px，模型 11px（相同就是本缺陷的原形态）
     expect(acct).toMatch(/font-size:\s*12px/)
-    expect(model).toMatch(/font-size:\s*11\.5px/)
+    expect(model).toMatch(/font-size:\s*11px/)
 
-    // ② 颜色：账号用 primary，模型用 secondary（相同就是本缺陷的原形态）
+    // ② 颜色：账号 primary，模型 tertiary（相同就是本缺陷的原形态）
     expect(acct).toMatch(/color:\s*var\(--dsw-alias-label-primary/)
-    expect(model).toMatch(/color:\s*var\(--dsw-alias-label-secondary/)
+    expect(model).toMatch(/color:\s*var\(--dsw-alias-label-tertiary/)
 
-    // ③ 反向对照：两段不得是同一组「字号 + 颜色」（防有人把两者一起改回同值）
+    // ③ 反向对照：两段不得是同一组「字号 + 颜色」
     const sig = (block: string): string => {
       const size = block.match(/font-size:\s*([^;]+);/)?.[1]?.trim() ?? ''
       const color = block.match(/color:\s*([^;]+);/)?.[1]?.trim() ?? ''
@@ -463,13 +530,34 @@ describe('账号层视觉层级（方案 A）', () => {
     expect(sig(acct)).not.toBe(sig(model))
   })
 
-  it('★ 模型行在色块之下再缩进一层（从属关系），且不再按账号数分支', () => {
-    // 模型行比账号头内容区多缩进 ⇒ 视觉上「挂在账号下面」。
-    expect(ruleOf('.dim-jh-ledgerModel')).toMatch(/padding:\s*2px\s+0\s+2px\s+14px/)
-    // ⚠️ 用户 2026-11-11 决策「单账号与多账号完全一样」⇒ `data-single` **属性**
-    //    必须已删除。复活它意味着有人又把「按账号数改样式」加了回来。
-    //    ⚠️ 判据只认**属性写法**（`'data-single':`）与 **CSS 选择器**，不认注释 ——
-    //    注释里提到这个名字是在解释「为什么删掉」，那是**应该存在**的。
+  it('★ 模型层有 ↳ 前导（装饰，用 ::before 而非文本节点）', () => {
+    const before = styles.match(/\.dim-jh-ledgerModel::before\s*\{([^}]*)\}/s)?.[1] ?? ''
+    expect(before, '缺少 .dim-jh-ledgerModel::before 规则').not.toBe('')
+    expect(before).toMatch(/content:\s*"↳"/)
+    // ⚠️ 必须是伪元素：塞进 children 会被 CSV 导出/复制/读屏念出来。
+    expect(client).not.toMatch(/dim-jh-ledgerModelName',[^)]*'↳'/)
+  })
+
+  it('★★★ provider 与账号**必须用各自的类名**（历史日树曾把 provider 画成账号）', () => {
+    // ⚠️ 真实报障：历史日树的 provider 行写的是 className: 'dim-jh-ledgerAccount'，
+    //    于是 buddy / qodercn 这些供应商被套上账号的色块。判据打在**渲染出的 props** 上。
+    //    这里做源码级粗筛：仓库里不存在「用 ledgerAccount 承载 provider 行」的写法。
+    expect(client).not.toMatch(/key:\s*providerRow\.provider,\s*className:\s*'dim-jh-ledgerAccount'/)
+    // 反向对照：provider 行确实用的是 -Provider
+    const providerRows = client.match(/key:\s*providerRow\.provider,\s*className:\s*'dim-jh-ledgerProvider'/g) ?? []
+    // 实时卡 + 历史日树 = 2 处（少一处就是又分叉了）
+    expect(providerRows).toHaveLength(2)
+  })
+
+  it('★ 窄屏必须收窄三层缩进（54px 在 <700px 会把模型名挤成三行）', () => {
+    const media = styles.slice(styles.indexOf('@media (max-width: 700px)'))
+    expect(media).toMatch(/\.dim-jh-ledgerAccount\s*\{[^}]*margin-left:\s*14px/)
+    expect(media).toMatch(/\.dim-jh-ledgerModel\s*\{[^}]*padding:\s*2px 0 2px 26px/)
+  })
+
+  it('★ 模型行不再按账号数分支，且 data-single 属性不得复活', () => {
+    // ⚠️ 判据只认**属性写法**与 **CSS 选择器**，不认注释 ——
+    //    注释里提到 data-single 是在解释「为什么删掉」，那是应该存在的。
     expect(client).not.toMatch(/'data-single'\s*:/)
     expect(styles).not.toMatch(/\[data-single/)
     expect(client).not.toMatch(/\[data-single/)
