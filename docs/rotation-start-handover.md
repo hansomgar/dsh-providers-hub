@@ -14,6 +14,32 @@
 > | `<DSH_PROFILE>` | DSH 的 profile 目录（含 `package.json` 与 `node_modules`） |
 >
 > ⚠️ 若你让 AI 帮忙操作，**只把路径告诉它**，不要让它猜 —— 猜错会改错文件。
+>
+> ---
+>
+> ## 🎯 职责边界（**上下文被压缩后必须先读这段**）
+>
+> 本会话（或接手的 AI）**只负责两件事**：
+>
+> | # | 职责 | 边界 |
+> |---|---|---|
+> | **1** | 维护「轮换起点」功能（PR #59） | 只改与 `preferredRotation` / `rotateFromPreferred` / `rotationStartId` 相关的代码 |
+> | **2** | 上游更新后 rebase 本功能并保持 PR 可用 | 只做同步，**不借机改功能** |
+>
+> ### ⚠️ 明确**不负责**的（已经交给其他 AI）
+>
+> | 需求 | 状态 |
+> |---|---|
+> | **Token 用量面板按账号归档 + 显示真实账号名 + 最近请求加账号列** | 方案已交付（`<PROXY_ROOT>/方案-Token面板按账号归档.md`），**由其他 AI 执行** |
+>
+> ⇒ 若有人在本会话提 Token 面板相关的改动，**告知它走另一个执行者**，不要在这里动手。
+>
+> ### ⚠️ 两个容易混淆的分支
+>
+> | 分支 | 内容 | 可否混用 |
+> |---|---|---|
+> | `feat/rotation-start` | 功能代码（**1 个提交**） | ✅ 只有它进 PR #59 |
+> | `docs/rotation-handover` | **就是本文档** | ❌ 不要合并进功能分支（会污染 PR diff） |
 
 ---
 
@@ -33,7 +59,7 @@
 
 ## 当前状态（请你先核实，不要假设）
 - 功能分支：feat/rotation-start
-- 功能提交：59d9e02fa875880473964fab90ac4a8bd3f74d55（**单个提交**，基线 1d12f80）
+- 功能提交：**c62ae2c**（`git rev-parse feat/rotation-start` 现查）<br>  基线**已随上游 rebase 过一次**（1d12f80 → 6ad2e24）⇒ 不要硬编码基线，用 `git merge-base`
 - 远端：fork = https://github.com/hansomgar/dsh-providers-hub.git
 - 上游：origin = iJetLi/dsh-providers-hub
 
@@ -57,7 +83,7 @@
 
 ## 如果 rebase 出问题
 `git rebase --abort` 可以完全恢复。
-若已搞乱：`git reset --hard 59d9e02`（这是已知良好的提交）
+若已搞乱：`git reset --hard $(git rev-parse fork/feat/rotation-start)`（回到远端已推的版本）
 ```
 
 ## 场景 B：上游接受了 PR，我要清理 fork
@@ -109,7 +135,7 @@ git push --force-with-lease fork feat/rotation-start
 
 ## 2.2 为什么用 rebase 而不是 merge
 
-本功能压在**单个提交**里（`59d9e02`，基线 `1d12f80`）。
+本功能压在**单个提交**里（每次 rebase 后 SHA 会变，用 `git rev-parse feat/rotation-start` 现查）。
 
 - `rebase` ⇒ 永远是「上游 + 1 个提交」⇒ `git log origin/master..HEAD` 恒为 1 条，
   diff 干净、冲突面最小；
@@ -223,15 +249,16 @@ cd <REPO_ROOT>
 git fetch origin
 
 # 上游改过的文件 ∩ 本功能改过的文件 = 可能冲突的文件
-$upstream = git diff --name-only 1d12f80..origin/master
-$mine     = git diff --name-only 1d12f80..HEAD
+$base = git merge-base HEAD origin/master
+$upstream = git diff --name-only $base..origin/master
+$mine     = git diff --name-only $base..HEAD
 $upstream | Where-Object { $mine -contains $_ }
 ```
 
 - **输出为空** ⇒ rebase 不会冲突，放心跑；
 - **有输出** ⇒ 那些文件要按 §2.4 处理。
 
-⚠️ 前提：`1d12f80` 是本功能的基线（写死在 §4.1）。
+⚠️ **用 `git merge-base` 自动算基线，不要硬编码** —— 本功能已 rebase 过一次（1d12f80 → 6ad2e24），写死的基线会立刻过时。
 若本功能已 rebase 过多次，基线要换成「上一次 rebase 的目标提交」——
 用 `git merge-base HEAD origin/master` 自动算：
 
@@ -244,7 +271,7 @@ git diff --name-only $base..origin/master | Where-Object { (git diff --name-only
 
 ```powershell
 git rebase --abort                    # rebase 中途取消
-git reset --hard 59d9e02              # 回到已知良好的功能提交
+git reset --hard $(git rev-parse fork/feat/rotation-start)   # 回到远端已推的版本
 git reflog                            # 查所有历史位置
 ```
 
@@ -360,8 +387,8 @@ UI 对这些渠道**不渲染**下拉框（`supportsRotation()` 白名单）—�
 |---|---|
 | 本地路径 | `<REPO_ROOT>` |
 | 功能分支 | `feat/rotation-start` |
-| 功能提交 | `59d9e02fa875880473964fab90ac4a8bd3f74d55` |
-| 上游基线 | `1d12f80e14bde6c73e86aa7f5eef6257d6fe0d0b` |
+| 功能提交 | **不写死** —— `git rev-parse feat/rotation-start` 现查（每次 rebase 后变） |
+| 上游基线 | **不写死** —— `git merge-base HEAD origin/master` 现查 |
 | 上游仓库 | `iJetLi/dsh-providers-hub`（remote 名 `origin`，**只读**） |
 | fork 仓库 | `hansomgar/dsh-providers-hub`（remote 名 `fork`） |
 | 改动规模 | 28 文件，+1797 / −55（其中注释 751 行、测试 743 行、功能代码约 200 行） |
