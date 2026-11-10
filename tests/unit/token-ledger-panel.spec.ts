@@ -405,3 +405,73 @@ describe('用量热力图 · 渲染接线与样式契约', () => {
     expect(css).not.toMatch(/`/)
   })
 })
+
+/**
+ * 账号层与模型层的**视觉区分度契约**（2026-11-11 用户报障）。
+ *
+ * 症状：账号行与模型行「区分度不高、账号不够显眼」。根因是**两层字号与颜色完全
+ * 相同**（都 11.5px / 都 `--dsw-alias-label-secondary`），只靠 600 字重与等宽字体族
+ * 区分 ⇒ 读起来是「四行平铺」，看不出谁是分组头。
+ *
+ * 修法（方案 A，用户选定）：账号行升为**色块分组头** —— 浅底 + 左侧品牌色条 +
+ * 12px 主文字色；模型行保持不动（压小会牺牲长模型名的可读性）。
+ *
+ * ⚠️ 这些断言是**数值级**的，不是「有没有某个类名」：
+ * 类名在、但字号/颜色又改回与模型行相同，正是本缺陷复发的形态。
+ */
+describe('账号层视觉层级（方案 A）', () => {
+  const styles = readFileSync(resolve(here, '../../plugin-src/client/jet-hub-styles.js'), 'utf8')
+
+  /** 取出某个选择器的声明块（只认 `{ … }`，不做嵌套解析）。 */
+  const ruleOf = (selector: string): string => {
+    const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    const m = styles.match(new RegExp(`${escaped}\\s*\\{([^}]*)\\}`, 's'))
+    return m?.[1] ?? ''
+  }
+
+  it('★ 账号头必须是「色块分组头」：底色 + 左侧色条 + 圆角', () => {
+    const head = ruleOf('.dim-jh-ledgerAccountHead')
+    expect(head, '找不到 .dim-jh-ledgerAccountHead 规则').not.toBe('')
+    // 底色块（分组头的核心视觉）
+    expect(head).toMatch(/background:\s*var\(--dsw-alias-bg-layer-3/)
+    // 左侧品牌色条（「这是标题」的信号）
+    expect(head).toMatch(/border-left:\s*3px\s+solid\s+var\(--dsw-alias-brand-primary/)
+    // 圆角，避免色块看起来像一块贴歪的矩形
+    expect(head).toMatch(/border-radius:\s*6px/)
+  })
+
+  it('★★ 账号名必须与模型名**不同级**：字号更大 + 颜色更高一档', () => {
+    const acct = ruleOf('.dim-jh-ledgerAccountName')
+    const model = ruleOf('.dim-jh-ledgerModelName')
+    expect(acct, '找不到 .dim-jh-ledgerAccountName 规则').not.toBe('')
+    expect(model, '找不到 .dim-jh-ledgerModelName 规则').not.toBe('')
+
+    // ① 字号：账号 12px，模型 11.5px（相同就是本缺陷的原形态）
+    expect(acct).toMatch(/font-size:\s*12px/)
+    expect(model).toMatch(/font-size:\s*11\.5px/)
+
+    // ② 颜色：账号用 primary，模型用 secondary（相同就是本缺陷的原形态）
+    expect(acct).toMatch(/color:\s*var\(--dsw-alias-label-primary/)
+    expect(model).toMatch(/color:\s*var\(--dsw-alias-label-secondary/)
+
+    // ③ 反向对照：两段不得是同一组「字号 + 颜色」（防有人把两者一起改回同值）
+    const sig = (block: string): string => {
+      const size = block.match(/font-size:\s*([^;]+);/)?.[1]?.trim() ?? ''
+      const color = block.match(/color:\s*([^;]+);/)?.[1]?.trim() ?? ''
+      return `${size}|${color}`
+    }
+    expect(sig(acct)).not.toBe(sig(model))
+  })
+
+  it('★ 模型行在色块之下再缩进一层（从属关系），且不再按账号数分支', () => {
+    // 模型行比账号头内容区多缩进 ⇒ 视觉上「挂在账号下面」。
+    expect(ruleOf('.dim-jh-ledgerModel')).toMatch(/padding:\s*2px\s+0\s+2px\s+14px/)
+    // ⚠️ 用户 2026-11-11 决策「单账号与多账号完全一样」⇒ `data-single` **属性**
+    //    必须已删除。复活它意味着有人又把「按账号数改样式」加了回来。
+    //    ⚠️ 判据只认**属性写法**（`'data-single':`）与 **CSS 选择器**，不认注释 ——
+    //    注释里提到这个名字是在解释「为什么删掉」，那是**应该存在**的。
+    expect(client).not.toMatch(/'data-single'\s*:/)
+    expect(styles).not.toMatch(/\[data-single/)
+    expect(client).not.toMatch(/\[data-single/)
+  })
+})
