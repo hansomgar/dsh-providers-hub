@@ -242,9 +242,61 @@ export function ledgerSubtitle() {
   return '本机流水 · 明细重启清空 · 日累计已存盘';
 }
 
-/** 账号显示名：空串（未归属）给中性占位，其余原样。 */
-export function accountLabel(accountId) {
-  return typeof accountId === 'string' && accountId.length > 0 ? accountId : '未归属';
+/**
+ * 账号显示名。
+ *
+ * 优先级：`nickname`（用户在 Jet Hub 面板自填的备注）→ `accountName`（上游真实
+ * 用户名，如 `mylzscy4`）→ **内部 id**。`nameMap` 由调用方从 `account.list` 建好
+ * 再传进来 —— 账本（`src/token-ledger.ts`）本身只存 `accountId`，**不碰凭据**，
+ * 拿不到 `accountName`。
+ *
+ * @param accountId 账号池条目 id；空串 = 「未归属」（凭据解析没回报的请求）。
+ * @param nameMap 可选的 id → 显示名映射（`Map` 或普通对象都认）。
+ *   ⚠️ **必须可选**：不传时行为与加参数前**逐字节相同**（既有 32 条测试里的
+ *   `accountLabel('qoder-bb211a53') === 'qoder-bb211a53'` 就是这条契约的守卫）。
+ * @returns 显示名；**任何一步取不到都回落 id**，绝不返回空串。
+ *
+ * ⚠️ **查不到时必须回落 id**（不是空、也不是「已删除」）：账本是**日聚合**，
+ * 账号删掉以后它过去的用量还留在账本里，用户要看得到「有个账号用了多少」。
+ * 而「这次没读到名字」与「账号真被删了」在客户端**无法区分**，所以不能加任何
+ * 类似「（已删除）」的后缀 —— 那会把「凭据坏了一次」误标成「账号没了」。
+ *
+ * ⚠️ **`nameMap` 里是空串也不能用**：`account.list` 的 `nickname` / `accountName`
+ * 偶尔会是空串（老凭据没有 `account_name`），直接采纳会渲染出一个**空白账号行**，
+ * 比显示裸 id 更让人困惑。
+ */
+export function accountLabel(accountId, nameMap) {
+  if (typeof accountId !== 'string' || accountId.length === 0) return '未归属';
+  const mapped = nameMap instanceof Map ? nameMap.get(accountId) : nameMap?.[accountId];
+  if (typeof mapped === 'string' && mapped.length > 0) return mapped;
+  return accountId;
+}
+
+/**
+ * 从 `account.list` 的返回里建「账号 id → 显示名」映射。
+ *
+ * 名字优先级与 {@link accountLabel} 一致：`nickname` → `accountName`。
+ * 两者都取不到的账号**不进映射**（不是塞空串）—— 这样 `accountLabel` 会回落 id，
+ * 而不是渲染空白。
+ *
+ * ⚠️ **纯函数、不读凭据**：`accountName` 是宿主 `account.list` 现从各账号自己的
+ * credential ref 里读出来的派生值（见 `ProviderAccountStatus.accountName` 的注释），
+ * 客户端只消费、不重算 —— 两端各写一份必然漂移。
+ * ⚠️ 参数形态宽容（`undefined` / 非数组 / 元素非对象都跳过）：这个函数的失败会让
+ * 整个 Token 面板报销，而它只是「锦上添花的名字」。
+ */
+export function buildAccountNameMap(accounts) {
+  const map = new Map();
+  if (!Array.isArray(accounts)) return map;
+  for (const account of accounts) {
+    if (account === null || typeof account !== 'object') continue;
+    if (typeof account.id !== 'string' || account.id.length === 0) continue;
+    const nickname = typeof account.nickname === 'string' ? account.nickname : '';
+    const accountName = typeof account.accountName === 'string' ? account.accountName : '';
+    const label = nickname.length > 0 ? nickname : (accountName.length > 0 ? accountName : '');
+    if (label.length > 0) map.set(account.id, label);
+  }
+  return map;
 }
 
 /**
