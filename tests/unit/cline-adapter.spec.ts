@@ -280,17 +280,22 @@ describe('ClineAdapter resolveModel', () => {
     ])
   })
 
-  it('默认档位是 high（对齐 IDE 截图的选中态）', async () => {
+  it('默认档位是 max（2026-11-10 用户要求「选模型后默认最高档」）', async () => {
     const adapter = makeAdapter()
     const resolved = await adapter.resolveModel('cline', 'cline-free/deepseek-v4.1-flash')
-    expect(resolved.reasoning?.defaultEffort).toBe('high')
+    // ⚠️ 原值 `high`（对齐 IDE 截图选中态）；用户 2026-11-10 明确要求默认最高档
+    // ⇒ 本家五档里最强的是 `max`（界面显示名「Extra」）。
+    expect(resolved.reasoning?.defaultEffort).toBe('max')
+    // 核心不变式：默认档必须落在声明集合内（DSH 会直接拿它发请求）。
+    const ids = resolved.reasoning?.efforts.map((e) => e.id) ?? []
+    expect(ids).toContain(resolved.reasoning?.defaultEffort)
   })
 
   it('未知模型同样有 5 档（覆盖范围决策：统一给，不按目录细分）', async () => {
     const adapter = makeAdapter()
     const resolved = await adapter.resolveModel('cline', 'unknown/model-x')
     expect(resolved.reasoning?.efforts).toHaveLength(5)
-    expect(resolved.reasoning?.defaultEffort).toBe('high')
+    expect(resolved.reasoning?.defaultEffort).toBe('max')
   })
 })
 

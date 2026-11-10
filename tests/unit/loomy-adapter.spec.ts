@@ -269,7 +269,8 @@ describe('Loomy 兜底表漂移（2026-11-06 整轮失败）', () => {
     expect(resolved.reasoning!.efforts.map((e) => e.id))
       .toEqual(['none', 'low', 'medium', 'high', 'xhigh'])
     // ⚠️ 默认档必须落在 efforts 内（DSH 会拿它直接发请求）。
-    expect(resolved.reasoning!.defaultEffort).toBe('high')
+    // 2026-11-10 起取集合内最强档 ⇒ `xhigh`（本家档位上限，见 `LOOMY_EFFORTS`）。
+    expect(resolved.reasoning!.defaultEffort).toBe('xhigh')
   })
 
   it('⚠️ 目录外 id **不**编造上下文窗口（窗口是该模型的事实）', async () => {
@@ -441,14 +442,16 @@ describe('LoomyAdapter 思考档位', () => {
    *
    * ⚠️ 反向断言：**绝不能**等于远端声明的 `low`（否则等于没改）。
    */
-  it('默认档是 high，不是远端声明的 low（用户要求）', async () => {
+  it('默认档取集合内最强档，不是远端声明的 low（用户要求）', async () => {
     const adapter = makeAdapter({
       fetchRemoteModels: async () => parseLoomyRemoteModels({
         data: [remoteEntry({ reasoning_efforts: EFFORTS, default_reasoning_effort: 'low' })],
       }),
     })
     const resolved = await adapter.resolveModel('loomy', 'MiniMax-M3')
-    expect(resolved.reasoning?.defaultEffort).toBe('high')
+    // ⚠️ 2026-11-10 用户要求「选模型后默认最高档」：本家 EFFORTS 上限是 `xhigh`
+    //（`['none','low','medium','high','xhigh']`，没有 `max`）⇒ 默认即 `xhigh`。
+    expect(resolved.reasoning?.defaultEffort).toBe('xhigh')
     expect(resolved.reasoning?.defaultEffort).not.toBe('low')
   })
 
@@ -456,10 +459,12 @@ describe('LoomyAdapter 思考档位', () => {
    * ⚠️ `defaultEffort` **必须落在 `efforts` 内** —— DSH 会拿它直接发请求，
    * 给一个不存在的档位会抛 `UNSUPPORTED_REASONING_EFFORT`，比不给更糟。
    *
-   * 这里造一个**不含 `high`** 的模型（远端目录变化时真会发生），
-   * 期望**不下发默认档**（退回 DSH 的「服务商默认」），而不是硬发 `high`。
+   * 这里造一个**不含 `high`** 的模型（远端目录变化时真会发生）。
+   * ⚠️ 2026-11-10 行为变更：原实现丢弃默认档（UI 停在「服务商默认」）；
+   *    现改为回落到**该集合内最强档**（本例 `medium`）。
+   *    守的**核心不变式不变**：声明出的 `defaultEffort` 必在 `efforts` 内。
    */
-  it('模型不提供 high 档时不下发默认档（但档位照常给出）', async () => {
+  it('模型不含 high 档时回落到集合内最强档（且必在集合内）', async () => {
     const adapter = makeAdapter({
       fetchRemoteModels: async () => parseLoomyRemoteModels({
         data: [remoteEntry({ reasoning_efforts: ['low', 'medium'], default_reasoning_effort: 'low' })],
@@ -467,7 +472,8 @@ describe('LoomyAdapter 思考档位', () => {
     })
     const resolved = await adapter.resolveModel('loomy', 'MiniMax-M3')
     expect(resolved.reasoning?.efforts.map((e) => e.id)).toEqual(['low', 'medium'])
-    expect(resolved.reasoning?.defaultEffort).toBeUndefined()
+    expect(resolved.reasoning?.defaultEffort).toBe('medium')
+    expect(resolved.reasoning?.efforts.map((e) => e.id)).toContain(resolved.reasoning?.defaultEffort)
   })
 
   /**
@@ -504,9 +510,9 @@ describe('LoomyAdapter 思考档位', () => {
     })
     const resolved = await adapter.resolveModel('loomy', 'qwen3.8-flash')
     expect(resolved.reasoning?.efforts.map((e) => e.id)).toEqual(EFFORTS)
-    // ⚠️ 兜底路径的默认档也必须与远端路径一致（都是 high），
+    // ⚠️ 兜底路径的默认档也必须与远端路径一致（都是集合内最强档），
     // 否则「远端可用/不可用」会让默认档悄悄变化。
-    expect(resolved.reasoning?.defaultEffort).toBe('high')
+    expect(resolved.reasoning?.defaultEffort).toBe('xhigh')
   })
 
   it('未登记的中文名回退到 id 本身（新档位上线时不至于空白）', async () => {

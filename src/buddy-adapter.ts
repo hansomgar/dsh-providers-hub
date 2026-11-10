@@ -41,6 +41,7 @@ import {
 } from './buddy.js'
 import type { BuddyCredential, BuddyRemoteModel } from './buddy.js'
 import { CODEBUDDY, resolveUserAgent, type BuddyFallbackModel, type BuddyProduct } from './product.js'
+import { strongestReasoningEffort } from './reasoning-ladder.js'
 import { normalizeHarnessMessages } from './message-shape.js'
 import { projectRequestImage, type ImageRequestTarget } from './image-budget.js'
 import { createBlankReasoningSuppressor, createDsmlMarkerNormalizer, createReasoningLoopDetector, fixDsmlMarkers, hasUsableToolName, classifyToolArguments, toolArgsInvalidBlocks, toolArgsInvalidIsSoleOutput, isProseTruncatedByStopString, isReasoningLoopGuardEnabled, isTruncatedArguments, normalizeToolArguments, readWithIdleTimeout, reasoningLoopFailure, resolveEmptyResponseReason, resolveToolPairing, splitThinkTaggedContent, stripBareThinkCloseTagIfEnabled, stripCourseLeakFromHistoryContent, stripCourseLeakIfEnabled, toolArgsInvalidFailure } from './sse.js'
@@ -2548,6 +2549,19 @@ export class BuddyAdapter extends LlmAdapter {
   }
 
   /**
+   * 默认思考档：远端声明优先，否则回落到**最强档**。
+   *
+   * ⚠️ 远端值必须**落在 `efforts` 内**才认（远端数据可能与它自己下发的档位
+   *    列表不一致，那种情况下沿线既有口径当作「未声明」）。
+   * ⚠️ 回落值读 {@link strongestReasoningEffort}（强度序权威），
+   *    不能写成 `efforts[efforts.length - 1]` —— 数组顺序是**展示顺序**。
+   */
+  private defaultEffortOf(remoteDefault: string | undefined, efforts: readonly string[]): string | undefined {
+    if (remoteDefault !== undefined && efforts.includes(remoteDefault)) return remoteDefault
+    return strongestReasoningEffort(efforts)
+  }
+
+  /**
    * 把本家条目转成共享骨架的中间结构。
    *
    * ⚠️ **`all` 是「用于同名消歧的集合」，必须传未过滤的全量集合** ——
@@ -2598,9 +2612,15 @@ export class BuddyAdapter extends LlmAdapter {
                 id: ReasoningEffortId(id),
                 name: EFFORT_NAMES[id] ?? id,
               })),
-              ...remoteDefault !== undefined && efforts.includes(remoteDefault)
-                ? { defaultEffort: ReasoningEffortId(remoteDefault) }
-                : {},
+              // 默认档：远端 `reasoning.defaultEffort` 优先；远端没表态时**回落到
+              // 最强档**（用户 2026-11-10 要求「选模型后默认最高档」）。
+              // ⚠️ 判据见 `defaultEffortOf` / `strongestReasoningEffort` 的说明。
+              ...(() => {
+                const fallbackDefault = this.defaultEffortOf(remoteDefault, efforts)
+                return fallbackDefault !== undefined
+                  ? { defaultEffort: ReasoningEffortId(fallbackDefault) }
+                  : {}
+              })(),
             },
           }
         : {},

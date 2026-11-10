@@ -44,6 +44,7 @@ import { maskProxyPassword } from './proxy-mask.js'
 import { unwrapQoderEnvelopeStream } from './qoder-envelope.js'
 import { QODER, type QoderFallbackModel, type QoderModelPromotion, type QoderProduct } from './qoder-product.js'
 import { projectRequestImage, type ImageRequestTarget } from './image-budget.js'
+import { defaultReasoningEffortOf } from './reasoning-ladder.js'
 import {
   registerAdapterIdempotent,
 } from './llm-register-compat.js'
@@ -1334,8 +1335,10 @@ export class QoderAdapter extends LlmAdapter {
       // ⚠️ `defaultEffort` 必须落在 `efforts` 内 —— DSH 会直接拿它发请求，
       // 给一个不存在的档位会抛 `UNSUPPORTED_REASONING_EFFORT`
       // （同 `trae-adapter.ts` 的教训）。
-      ...fallback !== undefined && efforts.includes(fallback)
-        ? { defaultEffort: ReasoningEffortId(fallback) }
+      // ⚠️ 上游没表态时**回落到最强档**（用户 2026-11-10 要求「选模型后默认最高档」）：
+      //    判据读 `defaultReasoningEffortOf`（上游优先 → 强度序最强档）。
+      ...defaultReasoningEffortOf(fallback, efforts) !== undefined
+        ? { defaultEffort: ReasoningEffortId(defaultReasoningEffortOf(fallback, efforts)!) }
         : {},
     }
   }

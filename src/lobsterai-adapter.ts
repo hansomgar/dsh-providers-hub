@@ -46,6 +46,7 @@ import {
   type LobsteraiCredential,
 } from './lobsterai.js'
 import { LOBSTERAI, type LobsteraiFallbackModel, type LobsteraiProduct } from './lobsterai-product.js'
+import { defaultReasoningEffortOf } from './reasoning-ladder.js'
 import { projectRequestImage, type ImageRequestTarget } from './image-budget.js'
 import {
   classifyLobsteraiError,
@@ -955,6 +956,10 @@ export class LobsteraiAdapter extends LlmAdapter {
     // 给一个不存在的档位比不给更糟。远端数据不一致时退化为不声明默认值。
     // `defaultLevel` 引用的是**产品侧 level**，故先按 level 找到那一档，再取它的 wire 值。
     const defaultWire = config.options.find((option) => option.level === config.defaultLevel)?.openclawLevel
+    const effortIds = config.options.map((option) => option.openclawLevel)
+    // ⚠️ 2026-11-10 用户要求「选模型后默认最高档」：上游没给 `defaultLevel` 时
+    //    按强度序取最强档（原先那种情形不声明默认档 ⇒ UI 停在「provider 默认」）。
+    const chosenDefault = defaultReasoningEffortOf(defaultWire, effortIds)
     return {
       efforts: config.options.map((option) => ({
         id: ReasoningEffortId(option.openclawLevel),
@@ -962,8 +967,8 @@ export class LobsteraiAdapter extends LlmAdapter {
         // 回退分支只为兼容「上游只给 wire 值」的异常形态，正常不会走到。
         name: EFFORT_NAMES[option.level] ?? EFFORT_NAMES[option.openclawLevel] ?? option.level,
       })),
-      ...defaultWire !== undefined
-        ? { defaultEffort: ReasoningEffortId(defaultWire) }
+      ...chosenDefault !== undefined
+        ? { defaultEffort: ReasoningEffortId(chosenDefault) }
         : {},
     }
   }

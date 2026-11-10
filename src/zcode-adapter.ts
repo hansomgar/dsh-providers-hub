@@ -68,6 +68,7 @@ import { RemoteCatalogGate } from './remote-catalog-gate.js'
 import { broadcastCatalogChanged } from './catalog-broadcast.js'
 import { collectImages, serializeMessages } from './openai-compat.js'
 import { projectRequestImage, type ImageRequestTarget } from './image-budget.js'
+import { defaultReasoningEffortOf } from './reasoning-ladder.js'
 import type { ZcodeCredential } from './zcode.js'
 import { ZCODE, type ZcodeFallbackModel, type ZcodeProduct, type ZcodeRemoteModelLike } from './zcode-product.js'
 import {
@@ -523,8 +524,10 @@ export class ZcodeAdapter extends LlmAdapter {
                * ⚠ `ReasoningEffortId` 是 branded 类型，必须用构造函数（同 qoder 的写法）。
                */
               efforts: levels.map((id) => ({ id: ReasoningEffortId(id), name: reasoningEffortLabel(id) })),
-              ...defaultLevel !== undefined && levels.includes(defaultLevel)
-                ? { defaultEffort: ReasoningEffortId(defaultLevel) }
+              // ⚠️ 2026-11-10 用户要求「选模型后默认最高档」：上游没表态时按
+              //    强度序取最强档（`defaultReasoningEffortOf` 已保证落在 levels 内）。
+              ...defaultReasoningEffortOf(defaultLevel, levels) !== undefined
+                ? { defaultEffort: ReasoningEffortId(defaultReasoningEffortOf(defaultLevel, levels)!) }
                 : {},
             },
           }

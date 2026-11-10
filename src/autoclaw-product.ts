@@ -229,7 +229,20 @@ export const AUTOCLAW_FALLBACK_MODELS: readonly AutoclawFallbackModel[] = [
  */
 export const AUTOCLAW_DECLARED_EFFORTS = Object.freeze(['low', 'high', 'max'] as const)
 
-/** 默认思考档：`high`（理由见 {@link AUTOCLAW_DECLARED_EFFORTS}）。 */
+/**
+ * 默认思考档：`high`。
+ *
+ * ⚠️ **这是全仓唯一刻意偏离「默认最强档」的一处，且是产品决策而非疏漏**。
+ *
+ * - 用户 2026-10-17 拍板：`max` 的适用面太窄 —— 实测难题上单次可跑
+ *   **170~192 秒**（`max`/`low` 都有超 190s 的样本），日常对话等待代价过高；
+ *   `high` 是智谱官方标注的推荐默认。
+ * - 用户 2026-11-10 复查「默认最高档」时**确认保留本条**（只改其他 provider），
+ *   故强度序（`max: 8` > `high: 5`）在这里**刻意不用于选默认档**。
+ *
+ * ⇒ 若将来要统一成最强档，必须先重测 `max` 的实际耗时，并让用户显式重拍板；
+ *   不要因为「别的 provider 都是最强档」就顺手把这里改掉。
+ */
 export const AUTOCLAW_DEFAULT_EFFORT = 'high' as const
 
 /**

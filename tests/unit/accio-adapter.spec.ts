@@ -327,12 +327,30 @@ describe('accioReasoningOf —— 把远端档位映射成 DSH 声明', () => {
     expect(r?.defaultEffort).toBe('high')
   })
 
-  it('★ 有数组但 default 不在集合内 ⇒ **丢弃 default**，档位本身照给', () => {
+  it('★ 有数组但 default 不在集合内 ⇒ **改取集合内最强档**，档位本身照给', () => {
     // ⚠️ DSH 会校验 `defaultEffort ∈ efforts`，指到集合外会让**整条档位声明**
     //    被丢弃（`model-catalog.ts` 的 `legal` 检查）—— 那比「少一个默认档」更糟。
+    // ⚠️ 2026-11-10 行为变更（用户要求「选模型后默认最高档」）：原本丢弃 default
+    //    ⇒ UI 停在「provider 默认」；现改为回落到**集合内最强档**（强度序权威）。
+    //    本用例守的**核心不变式**仍是「声明出的 defaultEffort 必在集合内」，
+    //    只是不再限定「必须为空」。
     const r = accioReasoningOf({ efforts: ['low', 'high'], defaultEffort: 'max' })
     expect(r?.efforts.map((e) => e.id)).toEqual(['low', 'high'])
-    expect(r?.defaultEffort).toBeUndefined()
+    expect(r?.defaultEffort).toBe('high')
+    expect(r?.efforts.map((e) => e.id)).toContain(r?.defaultEffort)
+  })
+
+  it('★ 有数组、远端**完全不表态** ⇒ 默认档 = 集合内最强档', () => {
+    const r = accioReasoningOf({ efforts: ['low', 'medium', 'high', 'xhigh', 'max'] })
+    expect(r?.defaultEffort).toBe('max')
+    const r2 = accioReasoningOf({ efforts: ['low', 'high'] })
+    expect(r2?.defaultEffort).toBe('high')
+  })
+
+  it('★ 只有「关闭思考」一档时不得把默认档硬抬成开启', () => {
+    // 判据：off 族永不当选（除非它是唯一选项）。这里集合只有 off ⇒ 默认就是 off。
+    const r = accioReasoningOf({ efforts: ['none'] })
+    expect(r?.defaultEffort).toBe('none')
   })
 
   it('★⚠️ 关键格：数组为空 + default 有值 ⇒ **单档**（用户要求的「只有一档也要显示」）', () => {

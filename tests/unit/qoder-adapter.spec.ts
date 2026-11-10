@@ -576,8 +576,11 @@ describe('QoderAdapter resolveModel 的思考档位', () => {
     for (const id of ['qmodel', 'qmodel_latest']) {
       const resolved = await adapter.resolveModel('qodercn', id)
       expect(resolved.reasoning?.efforts.map((e) => e.id), id).toEqual(['none'])
-      // 无档位可默认 → **不设** defaultEffort（DSH 显示「Default」）
-      expect(resolved.reasoning?.defaultEffort, id).toBeUndefined()
+      // ⚠️ 2026-11-10 行为变更：原先「无档位可默认 ⇒ 不设 defaultEffort」。
+      //    现按统一判据 `defaultReasoningEffortOf` 回落到集合内最强档 ——
+      //    本集合只有 `none` 一档 ⇒ 默认就是 `none`（不是"硬抬成开启"，
+      //    判据见 `strongestReasoningEffort`：唯一选项就是它时才选 off 族）。
+      expect(resolved.reasoning?.defaultEffort, id).toBe('none')
     }
   })
 

@@ -20,6 +20,7 @@
 
 import { createHash } from 'node:crypto'
 import { maskLobsteraiPhoneTail } from './lobsterai.js'
+import { defaultReasoningEffortOf } from './reasoning-ladder.js'
 import {
   ASTUDIO_SESSION_DEAD_CODES,
   type AstudioFallbackModel,
@@ -736,7 +737,11 @@ export function astudioReasoningOf(
   if (declared.length > 0) {
     return {
       efforts: declared.map((effort) => ({ id: effort, name: effort })),
-      ...fallback !== undefined && declared.includes(fallback) ? { defaultEffort: fallback } : {},
+      // ⚠️ 远端没表态时**回落到最强档**（用户 2026-11-10 要求「选模型后默认最高档」）：
+      //    判据读 `defaultReasoningEffortOf`（远端优先 → 强度序最强档，且必落在集合内）。
+      ...defaultReasoningEffortOf(fallback, declared) !== undefined
+        ? { defaultEffort: defaultReasoningEffortOf(fallback, declared) }
+        : {},
     }
   }
   if (fallback !== undefined && fallback.length > 0) {

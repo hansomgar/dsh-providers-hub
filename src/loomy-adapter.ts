@@ -56,6 +56,7 @@ import {
   serializeMessages,
 } from './openai-compat.js'
 import { planSessionTitleThinking } from './session-title.js'
+import { strongestReasoningEffort } from './reasoning-ladder.js'
 
 /**
  * 档位 id 数组 → `LlmResolvedModelInfo['reasoning']`（**唯一**实现）。
@@ -80,19 +81,22 @@ export function reasoningFromEfforts(
   efforts: readonly string[] | undefined,
 ): LlmResolvedModelInfo['reasoning'] {
   if (efforts === undefined || efforts.length === 0) return undefined
-  // ⚠️ **默认档用本插件自己的「高」，不采信远端的 `default_reasoning_effort`**（用户要求）。
+  // ⚠️ **默认档用「本模型声明里最强的一档」，不采信远端的 `default_reasoning_effort`**。
   // 依据：远端声明的是 `low`，而 DSH 的 `effectiveEffort` 直接取 `defaultEffort`
   // （`dsh-client-ui-model-selection`：`state.current?.reasoningEffort ?? reasoning?.defaultEffort`），
   // 即「用户没选时发哪个档」完全由这里决定 —— 沿用 low 会让默认思考偏浅。
-  const defaultEffort = LOOMY_PREFERRED_DEFAULT_EFFORT
-  const hasDefault = efforts.includes(defaultEffort)
+  //
+  // ⚠️ 2026-11-10 用户要求「选模型后默认最高档」：原值是常量 `high`，而本家档位
+  // 上限是 `xhigh`（`LOOMY_EFFORTS = ['none','low','medium','high','xhigh']`）
+  // ⇒ 改成按强度序取最强档，模型档位集合变化时也会自动跟上（不再写死一个 id）。
+  const defaultEffort = strongestReasoningEffort(efforts)
   return {
     efforts: efforts.map((id) => ({
       id: ReasoningEffortId(id),
       // 未登记的中文名回退到 id 本身（新档位上线时不至于空白）。
       name: LOOMY_EFFORT_NAMES[id] ?? id,
     })),
-    ...hasDefault ? { defaultEffort: ReasoningEffortId(defaultEffort) } : {},
+    ...defaultEffort !== undefined ? { defaultEffort: ReasoningEffortId(defaultEffort) } : {},
   }
 }
 
@@ -166,7 +170,7 @@ const LOOMY_EFFORT_NAMES: Readonly<Record<string, string>> = {
 }
 
 /**
- * 本插件选用的**默认思考档位**（用户要求：`high`）。
+ * 本插件选用的**默认思考档位**。
  *
  * ⚠️ **不采信远端的 `default_reasoning_effort`**（它声明的是 `low`）。
  * 依据是 DSH 的取值逻辑 —— `dsh-client-ui-model-selection` 的
@@ -174,10 +178,12 @@ const LOOMY_EFFORT_NAMES: Readonly<Record<string, string>> = {
  * 即「用户没选时发哪个档」**完全由适配器声明的 `defaultEffort` 决定**，
  * 沿用远端的 `low` 会让默认思考偏浅。
  *
- * ⚠️ **必须落在该模型的 `efforts` 内**：DSH 会拿它**直接发请求**，给一个不存在的
- * 档位会抛 `UNSUPPORTED_REASONING_EFFORT`。故 `reasoningFor` 里做了 `includes`
- * 校验 —— 某模型若不提供 `high`（远端目录变化时可能发生），则**不下发默认档**，
- * 退回 DSH 的「服务商默认」语义，而不是发一个非法值。
+ * ⚠️ 2026-11-10 用户要求「选模型后默认最高档」：**不再写死一个 id**，
+ * 而是由 {@link reasonedDefaultOf} 按强度序取该模型声明里最强的一档
+ * （本家档位上限是 `xhigh`，不是 `max` —— 模型若提供了更强档会自动跟上）。
+ *
+ * @deprecated 保留常量名只为兼容既有引用；实际判据见 `reasoningFromEfforts`
+ *   与 `strongestReasoningEffort`。
  */
 const LOOMY_PREFERRED_DEFAULT_EFFORT = 'high'
 

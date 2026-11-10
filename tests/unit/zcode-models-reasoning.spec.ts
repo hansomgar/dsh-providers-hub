@@ -276,9 +276,13 @@ describe('resolveModel 声明思考档位（选择器的唯一来源）', () => 
       }],
     })
     const info = await adapter.resolveModel('zcode', 'M')
-    // 指向不存在的档位会让选择器显示空白。
-    expect(info.reasoning?.defaultEffort).toBeUndefined()
+    // ⚠️ 2026-11-10 行为变更：原先「指向不存在的档位 ⇒ 不发 defaultEffort」。
+    //    现由 `defaultReasoningEffortOf` 兜住：远端值不在集合内时回落到
+    //    **集合内最强档**（本例 levels 只有 `['low']` ⇒ 默认 `low`）。
+    //    ⚠️ 守的核心不变式不变：defaultEffort 必在 efforts 内（否则选择器显空白）。
+    expect(info.reasoning?.defaultEffort).toBe('low')
     expect(info.reasoning?.efforts).toHaveLength(1)
+    expect(info.reasoning?.efforts.map((e) => e.id)).toContain(info.reasoning?.defaultEffort)
   })
 
   it('无档位的模型不声明 reasoning（UI 显示「未提供推理等级」）', async () => {

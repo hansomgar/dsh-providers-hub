@@ -57,6 +57,7 @@ import { AccountPool } from './account-pool.js'
 import { createModelCatalog, isCatalogFreshFor, type CatalogEntry, type ModelCatalog } from './model-catalog.js'
 // ⚠️ 对外 id 的归一规则**必须与聚合共用**（见 `accioModelIdOf` 的注释）。
 import { normalizeNameKey } from './canonical-models.js'
+import { defaultReasoningEffortOf } from './reasoning-ladder.js'
 import { RemoteCatalogGate } from './remote-catalog-gate.js'
 import { broadcastCatalogChanged } from './catalog-broadcast.js'
 import { registerAdapterIdempotent } from './llm-register-compat.js'
@@ -214,8 +215,11 @@ export function accioReasoningOf(
       // ⚠️ `defaultEffort` **必须落在 `efforts` 内**才带：DSH 会校验，
       //    指到集合外会让整条记录的档位声明被丢弃（`model-catalog.ts` 里那段
       //    `legal` 检查）—— 那不是崩溃，但会让「默认档」静默消失。
-      ...fallback !== undefined && declared.includes(fallback)
-        ? { defaultEffort: ReasoningEffortId(fallback) }
+      // ⚠️ 远端没表态时**回落到最强档**（用户 2026-11-10 要求「选模型后默认最高档」）。
+      //    判据读 `defaultReasoningEffortOf`（远端优先 → 强度序最强档，
+      //    未知 id 不参与、off 族永不当选）；不能写 `declared.at(-1)`（那是展示顺序）。
+      ...defaultReasoningEffortOf(fallback, declared) !== undefined
+        ? { defaultEffort: ReasoningEffortId(defaultReasoningEffortOf(fallback, declared)!) }
         : {},
     }
   }

@@ -306,10 +306,15 @@ export const CLINE_REASONING_EFFORTS: readonly { id: string; name: string }[] = 
  * ⚠️ **声明它会改变默认行为**：实测「不传 `reasoning_effort` → 模型完全不思考」，
  * 而 `dsh-client-ui-model-selection` 在用户未手动选择时会自动采用
  * `model.reasoning.defaultEffort`（`state.current?.reasoningEffort ?? defaultEffort`）。
- * 即声明后 Cline 从「默认不思考」变成「默认 High 思考」，与 IDE 一致，
+ * 即声明后 Cline 从「默认不思考」变成「默认思考」，与 IDE 一致，
  * 代价是思考 token 计入 `completion_tokens`。这是**用户明确要求**的变更。
+ *
+ * ⚠️ 2026-11-10 用户要求「选模型后默认最高档」：原值是 `high`（3/5 档位）。
+ *    本家在 {@link CLINE_REASONING_EFFORTS} 里最强的是 `max`（界面显示名
+ *    「Extra」）⇒ 改为 `max`，与 `strongestReasoningEffort` 的判据一致，
+ *    避免「同样五档、别的 provider 默认最强、cline 默认中间」的割裂。
  */
-export const CLINE_DEFAULT_REASONING_EFFORT = 'high'
+export const CLINE_DEFAULT_REASONING_EFFORT = 'max'
 
 /** Cline provider 配置（生产环境）。 */
 export const CLINE: ClineProduct = {

@@ -75,6 +75,7 @@ import { collectImages, consumeOpenAiSse, httpErrorCode, serializeMessages } fro
 import { isAbortLike } from './aggregate-adapter.js'
 import { registerAdapterIdempotent } from './llm-register-compat.js'
 import { nextUtc8DayStartMs } from './model-queue.js'
+import { defaultReasoningEffortOf } from './reasoning-ladder.js'
 import { retryAfterMsFromResponse } from './retry-after.js'
 import { reportLedgerAccount } from './token-ledger.js'
 
@@ -391,10 +392,13 @@ export class ModelscopeAdapter extends LlmAdapter {
         : (['text'] as const),
       // ⚠️ 窗口未知**不编造**（0 是「不知道」哨兵）⇒ 省略该字段。
       ...(m.contextWindow ?? 0) > 0 ? { contextWindow: m.contextWindow } : {},
-      // ⚠️ 档位经 `modelscopeReasoningOf` 归一（`defaultEffort` 必须落在 `efforts` 内）。
+      // ⚠️ 档位经 `defaultReasoningEffortOf` 归一（`defaultEffort` 必须落在 `efforts` 内）。
+      // ⚠️ 2026-11-10 用户要求「选模型后默认最高档」：本家原先**完全不声明**
+      //    `defaultEffort` ⇒ UI 停在「provider 默认」。现按强度序取最强档。
       ...(() => {
         const efforts = m.efforts ?? []
         if (efforts.length === 0) return {}
+        const defaultEffort = defaultReasoningEffortOf(undefined, efforts)
         return {
           reasoning: {
             efforts: efforts.map((effort) => ({
@@ -404,6 +408,9 @@ export class ModelscopeAdapter extends LlmAdapter {
               // 也不猜一个可能错译的中文（与 opencode 同取向）。
               name: effort === 'none' ? '关闭' : effort,
             })),
+            ...defaultEffort !== undefined
+              ? { defaultEffort: ReasoningEffortId(defaultEffort) }
+              : {},
           },
         }
       })(),

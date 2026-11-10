@@ -152,6 +152,78 @@ export function translateReasoningEffort(
 }
 
 /**
+ * 默认档的**统一判据**：远端声明优先，否则回落到最强档，且**必须落在 `declared` 内**。
+ *
+ * ## 为什么要有这一条（而不是每个适配器各写一遍）
+ *
+ * 仓库里十几处适配器都要回答同一个问题：「这个模型的默认思考档是哪个？」
+ * 各写一遍必然漂移，而漂移的症状是「同一个模型在两个 provider 上默认档不同」——
+ * 用户完全无从预期（也踩过：`defaultEffort` 指到集合外，被 `model-catalog.ts`
+ * 的 `legal` 检查静默丢弃，默认档凭空消失）。
+ *
+ * ## 取值的三层优先级
+ *
+ * 1. `remote` 有值**且**在 `declared` 内 ⇒ 用它（远端是真权威）；
+ * 2. 否则取 {@link strongestReasoningEffort}（= 声明里 rank 最大的一档）；
+ * 3. 都不成立 ⇒ `undefined`（调用方**不声明**默认档，交给上游默认）。
+ *
+ * ⚠️ **第 2 层不是「擅自改用户行为」**：它只作用于「远端压根没表态」的模型。
+ * 对**刻意声明了例外**的调用方（如 minimax M3 的「M3 没有 default_effort
+ * ⇒ 不设 defaultEffort ⇒ 保持服务端默认」），调用方**不该调用本函数**，
+ * 而应继续走它自己的判据 —— 那条例外是有实测依据的产品决策，不在本函数职责内。
+ *
+ * @param remote - 远端（或兜底表）声明的默认档；`undefined` = 没表态
+ * @param declared - 模型声明的全部档位 id
+ */
+export function defaultReasoningEffortOf(
+  remote: string | undefined,
+  declared: readonly string[],
+): string | undefined {
+  if (remote !== undefined && declared.includes(remote)) return remote
+  return strongestReasoningEffort(declared)
+}
+
+/**
+ * 模型声明的档位里**最强的那一档**（无档位 / 全是未知 id ⇒ `undefined`）。
+ *
+ * ## 用途：默认档
+ *
+ * DSH 的 composer 在 `reasoning.defaultEffort` **缺失**时不选中任何一档、
+ * 只显示「provider 默认」（宿主 `client.js` 的 `effort.providerDefault` 分支），
+ * 于是用户每换一次模型都要手动挑一次档位 —— 而各适配器声明的档位数量与
+ * 强弱分布并不一致（3 档 / 5 档 / 只有一档），用户没法预期「默认到底是哪一档」。
+ *
+ * 本函数给出一条**跨 provider 统一的判据**：默认档 = 声明的档位里 rank 最大者。
+ * 与 {@link REASONING_EFFORT_RANK} 同源，故 `max` 恒强于 `xhigh`、`xhigh` 恒强于
+ * `high`，不会因为某个 provider 把数组写成别的顺序而漂移。
+ *
+ * ## ⚠️ 三条判据（都刻意如此）
+ *
+ * 1. **未登记的私有 id 不参与**：不知道强度就不能声称它「最强」——
+ *    与 {@link translateReasoningEffort} 同口径。若一档都认不出来，
+ *    返回 `undefined` 让调用方**不声明**默认档（宁可不选，也不要瞎选）。
+ * 2. **`off` / `none` 永不当选**：rank 0 是「关闭思考」族，
+ *    把它当默认等于替用户把功能关掉了（本仓库对这条有明文红线）。
+ *    故只有「声明里全是 off 族」时才回落到 off（那时它是唯一选项）。
+ * 3. **同 rank 取**声明顺序里的**后者**：数组顺序即宿主展示顺序，
+ *    同 rank 说明强度等价（如 `on` 与 `high` 都记 5），此时尊重适配器的书写顺序。
+ *
+ * @param declared - 模型声明的档位 id 列表（越靠后越强，除非 rank 另有表态）
+ * @returns 最强档的 id；无法判定时 `undefined`
+ */
+export function strongestReasoningEffort(declared: readonly string[]): string | undefined {
+  let best: { effort: string; rank: number } | undefined
+  for (const effort of declared) {
+    const rank = reasoningRankOf(effort)
+    // 判据 1：未登记的 id 强度未知，不得声称它最强。
+    if (rank === undefined) continue
+    if (best === undefined || rank >= best.rank) best = { effort, rank }
+  }
+  // 判据 2：落到 off 族只有在「唯一可行选项就是它」时才允许（见上方说明）。
+  return best?.effort
+}
+
+/**
  * 反查：某个模型声明的 id，在 OpenAI 那 8 个规范名里**应该用哪个**。
  *
  * 用途是把「该填哪几个」机读化（`/v1/models` 的 `openai_efforts`、网关面板的
