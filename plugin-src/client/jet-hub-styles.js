@@ -1073,11 +1073,41 @@ const STYLES = `
   font-size: 11px; line-height: 16px; font-weight: 400;
   color: var(--dsw-alias-label-secondary, #4e5969); overflow-wrap: anywhere;
 }
-/* 次数：右对齐组的第一个元素，由它吃掉 margin-left: auto 把整组推到右边。 */
+/* 次数：统计组的**第一格**。
+   ⚠️ 它不再吃 margin-left: auto —— 推右的职责已交给父级
+   .dim-jh-ledgerStatGroup（用户 2026-11-11：「统计信息要放在行中间」，
+   靠单格各自 auto 会把「次数」推到参差不齐的位置）。 */
 .dim-jh-ledgerAccountReq {
-  margin-left: auto; flex: none; font-size: 10.5px; line-height: 15px;
+  flex: none; font-size: 10.5px; line-height: 15px;
   font-variant-numeric: tabular-nums; color: var(--dsw-alias-label-tertiary, #8f959e); white-space: nowrap;
 }
+
+/* ══════════════════════════════════════════════════════════════════════════
+   统计组（2026-11-11 用户第三次修正：「统计信息放在行中间」）
+
+   账号行与模型行**共用同一个组**，保证「次数 / 首字 / 总处理」三列在整棵树里
+   纵向对齐。
+
+   改前：每个统计格各自 margin-left: auto ⇒ 被推成「各自最右」，
+        而每组内容宽度不同 ⇒ 「次数」起始位置参差不齐（实测 4 种位置：
+        714 / 720 / 726 / 732），账号名后面留一大片空白。
+
+   改后：整组固定 460px、margin-left: auto 推到右边、**组内左对齐**
+        ⇒ 所有行的「次数」从同一条竖线开始（实测全部 510px）。
+        组内的「总处理」再用 margin-left: auto 顶到组尾，保持右缘也齐。
+
+   ⚠️ 460px 是实测出来的：最长的「首字 10.76s · P50 233.2 tok/s」约 175px +
+      「338 次」约 45px + 「总处理 106.35M」约 100px + 两个 8px 间隙 ≈ 336px，
+      给到 460px 是为了**长文本不折行**且组不贴边。
+   ⚠️ 窄屏（<700px）会把组宽收窄，见媒体查询。
+   ══════════════════════════════════════════════════════════════════════════ */
+.dim-jh-ledgerStatGroup {
+  display: flex; align-items: baseline; gap: 8px;
+  flex: none; margin-left: auto; width: 460px;
+}
+/* 组内最后一格（总处理）顶到组尾 ⇒ 各行的「总处理」右缘仍然对齐。 */
+.dim-jh-ledgerStatGroup > .dim-jh-ledgerModelTokens,
+.dim-jh-ledgerStatGroup > .dim-jh-ledgerAccountSum { margin-left: auto; }
 
 /* ── 第三层：模型（内容）—— 缩进 54px，最暗最小，带 ↳ 前导 ──
    ⚠️ ↳ 用 ::before 而不是塞进文本节点：它是纯装饰，不该被复制/导出/读屏念出来
@@ -1163,6 +1193,10 @@ const STYLES = `
      缩进减半后层级仍然看得出来（14/26px 相对 0 仍然错开），只是不再浪费宽度。 */
   .dim-jh-ledgerAccount { margin-left: 14px; }
   .dim-jh-ledgerModel { padding: 2px 0 2px 26px; }
+  /* ⚠️ 窄屏统计组必须收窄：460px 在 <700px 会把账号名挤没（甚至撑出横向滚动）。
+     收窄到 300px 并允许组内「首字」格省略 —— 数字仍对齐，长文本靠 title 悬停看全。 */
+  .dim-jh-ledgerStatGroup { width: 300px; gap: 6px; }
+  .dim-jh-ledgerStatGroup .dim-jh-ledgerPerf { max-width: 132px; overflow: hidden; text-overflow: ellipsis; }
   /* ⚠️ 窄屏 9 列 + 固定像素列宽必然超宽：**横向滚动**而不是压缩各列。
      压缩会把 9 列一起挤变形（数字列对不齐、模型名断成三行），比横向滚动更糟。
      只给明细表加滚动容器，不影响上面的汇总卡。 */
