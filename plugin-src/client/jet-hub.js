@@ -11339,7 +11339,7 @@ export function JetHubPage({ rpcCall }) {
       },
     },
       React.createElement('div', {
-        className: 'dim-jh-modal',
+        className: 'dim-jh-modal dim-jh-settingsModal',
         role: 'dialog',
         'aria-modal': 'true',
         'aria-label': 'Jet Hub 设置',
@@ -11396,7 +11396,7 @@ export function JetHubPage({ rpcCall }) {
           React.createElement('div', { className: 'dim-jh-settingsSection' },
             React.createElement('div', { className: 'dim-jh-settingsSectionTitle' }, '渠道原生搜索'),
             React.createElement('label', {
-              className: 'dim-jh-nativeSearch',
+              className: 'dim-jh-settingsToggleLine',
               title: (nativeSearchFailed
                 ? '⚠️ 开关状态读取失败，当前显示的是默认值（开启）。点击即可重新提交一次。'
                 : '渠道原生搜索：为支持原生搜索的渠道（CodeBuddy / WorkBuddy）启用其自带搜索。'
@@ -11413,7 +11413,8 @@ export function JetHubPage({ rpcCall }) {
                 disabled: nativeSearchBusy,
                 onChange: (event) => void toggleNativeSearch(event.target.checked),
               }),
-              React.createElement('span', null, '为支持原生搜索的渠道（CodeBuddy / WorkBuddy）启用其自带搜索'))),
+              React.createElement('span', { className: 'dim-jh-settingsToggleText' },
+                '为支持原生搜索的渠道（CodeBuddy / WorkBuddy）启用其自带搜索'))),
           /**
            * ⑤ 思考强度（2026-11-11 用户要求「加一个开关，开了就是现在的效果，
            * 关了就是原来的默认效果」）。
@@ -11423,13 +11424,22 @@ export function JetHubPage({ rpcCall }) {
            *
            * ⚠️ 文案必须把「开了是什么、关了是什么」**都写出来**：只写「默认取
            * 最高档」的话，用户关掉后看到思考变弱、却不知道这是不是预期。
+           *
+           * ⚠️⚠️ **读不到状态时必须说出来**（真实报障，2026-11-11 用户实测
+           * 「点击无效」）：宿主侧 RPC 是**进程内**的，插件更新后如果没重启 DSH，
+           * 客户端 bundle 已经热替换、而宿主还是旧代码 ⇒ 这条 RPC 不存在 ⇒
+           * 客户端 catch 后把开关**复原成默认开**，用户看到的就是「点了又弹回去、
+           * 而且没有任何提示」。⇒ 这里给一条明确的失败提示 + 重启指引。
            */
           React.createElement('div', { className: 'dim-jh-settingsSection' },
             React.createElement('div', { className: 'dim-jh-settingsSectionTitle' }, '思考强度'),
             React.createElement('label', {
-              className: 'dim-jh-nativeSearch',
+              className: reasoningDefaultFailed
+                ? 'dim-jh-settingsToggleLine dim-jh-settingsToggleLineFailed'
+                : 'dim-jh-settingsToggleLine',
               title: (reasoningDefaultFailed
-                ? '⚠️ 开关状态读取失败，当前显示的是默认值（开启）。点击即可重新提交一次。'
+                ? '⚠️ 开关状态读取失败（多为宿主还在运行旧代码），当前显示的是默认值（开启）。'
+                  + '请完全退出并重新打开 DSH 后再试。'
                 : '默认取最高档：选完模型后，思考强度自动落到该模型支持的最高档'
                   + '（如 Max / Extra High）。关闭后回到各渠道自己的默认档（多为 High）。'
                   + '两种模式下都可以在对话框的模型菜单里手动改档。'),
@@ -11438,13 +11448,19 @@ export function JetHubPage({ rpcCall }) {
                 type: 'checkbox',
                 className: 'dim-jh-switch',
                 checked: reasoningDefaultOn,
-                // 与「渠道原生搜索」同取向：读取失败时**不禁用**，让用户仍能切一次。
+                // 与「渠道原生搜索」同取向：读取失败时**不禁用**，让用户仍能切一次
+                //（切一次成功就说明宿主其实是新的，失败提示自然消失）。
                 disabled: reasoningDefaultBusy,
                 onChange: (event) => void toggleReasoningDefault(event.target.checked),
               }),
-              React.createElement('span', null,
-                '选完模型后自动把思考强度调到最高档（如 Max / Extra High）；关闭则用各渠道自己的默认档')),
-            React.createElement('p', { className: 'dim-jh-modalHint' },
+              React.createElement('span', { className: 'dim-jh-settingsToggleText' },
+                '选完模型后自动把思考强度调到最高档（如 Max / Extra High）；'
+                + '关闭则用各渠道自己的默认档')),
+            reasoningDefaultFailed
+              ? React.createElement('div', { className: 'dim-jh-settingsInlineFail', role: 'alert' },
+                '⚠️ 读取不到开关状态（宿主可能仍在运行旧代码）。请完全退出并重新打开 DSH。')
+              : null,
+            React.createElement('p', { className: 'dim-jh-settingsNote' },
               '开启后思考更充分，但思考 token 计入输出、与正文共享额度，'
               + '长回答更早触顶、首字更慢。感觉太慢可以关掉这一项。')))));
   }
