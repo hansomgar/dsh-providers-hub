@@ -582,7 +582,7 @@ describe('用量树三层视觉契约（provider / 账号 / 模型）', () => {
  * |---|---|
  * | 时间 `00:19:26` | 42.2px |
  * | 渠道 `直连`/`网关` | 23px |
- * | 账号 `chenshuiguanggg@gmail.com` | 154.5px |
+ * | 账号 `account-name@example.com` | 154.5px |
  * | 最长模型串 `workbuddy/deepseek-v4.1-flash-free` | 187.3px（+12 内边距 = 199.3） |
  *
  * 改前的病根：时间给 9%、渠道给 8%（各自浪费约 50px），模型只拿到 182px ⇒ **截断**。
