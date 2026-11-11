@@ -66,6 +66,45 @@ import { CANONICAL_REASONING_EFFORTS, reasoningRankOf } from './reasoning-ladder
 import { PROVIDER_REGISTRY } from './provider-registry.js'
 
 /**
+ * 开关的读取源：返回 `true` = 默认取最强档（当前行为），`false` = 逐字节回到
+ * 改动前的行为（各适配器自己声明的 `defaultEffort`）。
+ *
+ * ⚠️ 是一个**回调**而不是一个布尔：用户随时可能在设置里切换，而每次请求都会
+ * 走 `prepareCall` ⇒ 必须**每次现读**（与 `nativeWebSearchEnabled` 同一条约定：
+ * 缓存住回调的返回值就等于「改了不生效，要重启」）。
+ *
+ * ⚠️ 缺省（未接线）时为 `true`：插件装配没传 store 时保持功能开启，
+ * 与本功能引入时的行为一致。
+ */
+let enabledSource: (() => boolean) | undefined
+
+/**
+ * 接线开关来源（由 `index.ts` 在装配阶段调用一次）。
+ *
+ * @param source - 返回「是否默认取最强档」的回调；`undefined` 表示回到「恒开」。
+ */
+export function configureStrongestReasoningEnabled(source: (() => boolean) | undefined): void {
+  enabledSource = source
+}
+
+/**
+ * 当前是否启用「默认取最强档」。
+ *
+ * ⚠️ 读取失败**按开启**处理（与文档缺键语义同一条取向）：抛错的回调若被当成
+ * 「关闭」，用户会看到功能无缘无故消失，且毫无线索。
+ *
+ * @returns 启用时为 true。
+ */
+export function strongestReasoningEnabled(): boolean {
+  if (enabledSource === undefined) return true
+  try {
+    return enabledSource() !== false
+  } catch {
+    return true
+  }
+}
+
+/**
  * 封顶档（`rank` 上界）：本层**不会**选出比它更强的档。
  *
  * ⚠️ 与 `REASONING_EFFORT_RANK` 的关系：那是**强度序的唯一权威**，这里只读它，
@@ -150,6 +189,26 @@ function canonicalIndex(effort: string): number {
 }
 
 /**
+ * 会话标题请求该用哪一档（**跟随开关**）。
+ *
+ * 关掉「默认取最强档」时返回 `undefined` —— 调用方据此走**改动前**的分支
+ * （保留调用方给的档位 + 抬预算）。开关是**一对**语义：提档与降档必须同开同关，
+ * 只留降档会让「关不掉思考」的模型在标题请求里被无理由降档（那是一次白降，
+ * 用户看不出原因）。
+ *
+ * ⚠️ 为什么单独包一层而不是让调用方判开关：判据只能有一处。若 `session-title.ts`
+ * 自己判 `strongestReasoningEnabled()`，将来开关语义变化就要改两个文件 ——
+ * 正是本仓库反复记载的「一文件两套同义判据」。
+ *
+ * @param declaredEfforts - 模型声明的档位 id。
+ * @returns 最弱的非关闭档；开关关闭或没有可用档位时为 `undefined`。
+ */
+export function titleEffortWhenStrongest(declaredEfforts: readonly string[]): string | undefined {
+  if (!strongestReasoningEnabled()) return undefined
+  return weakestThinkingEffort(declaredEfforts)
+}
+
+/**
  * 把一份模型元数据里的 `defaultEffort` 改成最强档。
  *
  * 三条不变式：
@@ -165,6 +224,9 @@ function canonicalIndex(effort: string): number {
  * @returns 可能被改写的元数据（无变化时是同一对象）。
  */
 export function withStrongestDefaultEffort<T extends { reasoning?: DeclaredReasoning }>(info: T): T {
+  // ⚠️ 开关关掉时**原样返回入参**（同一引用）：下游会 `deepFreeze` / 比较身份，
+  //    且「关掉 = 逐字节回到改动前」这条承诺靠的就是这里什么都不做。
+  if (!strongestReasoningEnabled()) return info
   const reasoning = info.reasoning
   if (reasoning === undefined || reasoning.efforts.length === 0) return info
   const declared = reasoning.efforts.map((effort) => String(effort.id))

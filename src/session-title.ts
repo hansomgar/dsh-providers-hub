@@ -59,7 +59,7 @@
  */
 
 import { isThinkingOffEffort } from './reasoning-ladder.js'
-import { weakestThinkingEffort } from './reasoning-default.js'
+import { titleEffortWhenStrongest } from './reasoning-default.js'
 
 /**
  * DSH 给辅助标题请求打的用途标记（`GenerateOptions.purpose` 的取值之一）。
@@ -206,8 +206,12 @@ export function planSessionTitleThinking(input: {
    * ⚠️ 这**不是**「静默降档」（原注释里被否掉的那种）：标题请求是一次**内部
    * 辅助请求**，用户从不在界面上为它选档位，且它的档位本来就由本函数全权决定
    * （`disableByOmission` 分支同理）。普通对话路径完全不受影响（上面第一段早退）。
+   *
+   * ⚠️⚠️ **降档只在「默认取最强档」开着时发生**（`titleEffortWhenStrongest`）：
+   * 开关关掉后默认档回到各家自己的 `high`，此时再降档就是一次**白降**
+   * （64 token 本来就够 `high` 用，实测 153 思考 + 10 字正文），用户看不到原因。
    */
-  const weakest = weakestThinkingEffort(input.declaredEfforts)
+  const weakest = titleEffortWhenStrongest(input.declaredEfforts)
   return {
     isTitle: true,
     // 有可用非关闭档 ⇒ 用最弱那一档；一个都没有（档位为空/只剩关闭档）⇒ 保留调用方的。
