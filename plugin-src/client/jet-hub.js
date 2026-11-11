@@ -8672,6 +8672,23 @@ function ModelCenterPanel({ providers, rpcCall, statuses, onStatusReload }) {
       + '关闭开关后该模型不再出现在对话框的模型选择里；'
       + '「已下架」的模型是上游移除的，可用「重新显示」恢复。'
       + '未读取的供应商不参与搜索，点「加载全部」补齐。'),
+    /**
+     * ⚠️ **思考档位**的说明（2026-11-11 新增）。
+     *
+     * 两条信息缺一不可，且都必须是**对外承诺**而不是实现细节：
+     * - 选模型时的默认思考强度 = 该模型声明的最强档（这是本次功能的用户面）；
+     * - 有一批渠道**根本不提供**思考档位，对它们本功能无效 —— 不写这句，
+     *   用户会以为「选了模型却没变强」是插件坏了。
+     *
+     * ⚠️ 名单来自宿主 `src/reasoning-default.ts` 的 `PROVIDERS_WITHOUT_REASONING`
+     * （**唯一权威**）。这里**只做文案渲染**，不再列第二份 id 数组 ——
+     * 两处各列一份必然漂移，而漂移的症状是「面板说 A 家不支持、实际支持」。
+     */
+    React.createElement('p', { className: 'dim-jh-modalHint' },
+      '思考强度：选中模型后默认使用该模型支持的最高档（如 Max / Extra High），'
+      + '可在对话框的模型菜单里手动改回低档。'
+      + '没有「思考档位」的供应商不参与这一默认值，它们只有一个固定的思考行为。'),
+
     toggleError
       ? React.createElement('div', {
           className: 'dim-jh-probeNotice',
