@@ -139,18 +139,20 @@ pnpm run build:all
 ## 四之二、`TokenLedgerPanel` 的**固定冲突点**（PR #65 / 每次同步必看）
 
 这是本 fork 目前**唯一会稳定冲突**的地方 —— 每次 rebase / cherry-pick 大概率都要碰它。
-共两处，都在函数的**首尾**，且都有明确的处置规则：
+共三处，都有明确的处置规则（**2026-11-12 实测过**，见本节末尾）。
 
 | # | 冲突形态 | 处置 | 自证 |
 |---|---|---|---|
-| 1 | 函数**签名上方**：上游没有任何东西，但 fork 在 `TokenLedgerPanel` 之前插了两个常量（`LEDGER_ENTRY_COLUMNS` / `LEDGER_ENTRY_CSV_COLUMNS`），而 PR #65 在签名上方加了一段注释 ⇒ 两边落在同一位置 | **两边都保留**：fork 的常量与说明在前，PR 的注释 + `function TokenLedgerPanel({ rpcCall, onClose, chrome = 'modal' }) {` 在后。⚠️ 解完确认**只有一个** `function TokenLedgerPanel(` | `grep -c "function TokenLedgerPanel(" plugin-src/client/jet-hub.js` = **1** |
-| 2 | 文件尾的 `__tokenLedgerPanelForTest` **导出注释**：fork 与 PR 各写了一段 | **合并成一段**（fork 的「为什么需要导出」技术理由 + PR 的「两种外壳的支点」）。⚠️ 导出语句本身只留**一行** | `grep -c "export const __tokenLedgerPanelForTest" plugin-src/client/jet-hub.js` = **1** |
+| 1 | **函数签名上方**：上游没有任何东西，但 fork 在 `TokenLedgerPanel` 之前插了两个常量（`LEDGER_ENTRY_COLUMNS` / `LEDGER_ENTRY_CSV_COLUMNS`），而 PR #65 在签名上方加了一段注释 ⇒ 两边落在同一位置 | **两边都保留**：fork 的常量与说明在前，PR 的注释 + `function TokenLedgerPanel({ rpcCall, onClose, chrome = 'modal' }) {` 在后。⚠️ 解完确认**只有一个** `function TokenLedgerPanel(` | `grep -c "function TokenLedgerPanel(" plugin-src/client/jet-hub.js` = **1** |
+| 2 | **文件尾**的 `__tokenLedgerPanelForTest` 导出注释：fork 与 PR 各写了一段 | **合并成一段**（fork 的「为什么需要导出」技术理由 + PR 的「两种外壳的支点」）。⚠️ 导出语句本身只留**一行** | `grep -c "export const __tokenLedgerPanelForTest" plugin-src/client/jet-hub.js` = **1** |
+| 3 | **`package.json` 的 `dsh.client.inject` 数组**：双方都在**末尾**追加一项 ⇒ 经典的「同一位置各加一行」冲突（配置见兄弟条目 `tests/unit/usage-badge-client.spec.ts` 那条放宽后的判据） | **两项都留**，给**前一项补逗号**、后一项不加。顺序无关（该字段只影响模块到达顺序） | 用 `node -e "JSON.parse(require('fs').readFileSync('package.json','utf8'))"` 验证可解析，且 `inject` 里含 `@deepseek-ai/dsh-client-ui-sidebar-right` |
 
-### 为什么只在这两处（刻意设计的）
+### 为什么只在这三处（刻意设计的）
 
 PR #65 对 `jet-hub.js` 的改动**全部落在 `TokenLedgerPanel` 的首尾**：签名 1 行、
 `if (chrome === 'pane') { … }` 早退块（在 modal `return` 之前）、文件尾 1 行导出。
 **函数体一行未动**，而 fork 的 9 个视觉定制提交全在函数体里 ⇒ 二者结构性不重叠。
+`package.json` 那处与 `jet-hub.js` 无关，纯粹是「双方都在数组末尾追加」。
 
 ### 解完必查的三件事
 
@@ -170,6 +172,54 @@ npx vitest run tests/unit/token-ledger-panel.spec.ts    # 32 条，里面有按�
 modal 的 `dim-jh-modalHint` 与 `createElement('p', {…title:`。**别**把 modal 的 JSX
 抽成变量「为了共用」—— 那会让窗口切空、**上游自己的用例当场变红**，而症状看起来
 像「测试坏了」。
+
+---
+
+## 四之三、上游前进时的**实测同步演练**（2026-11-12 做过一次，两条轨都通过）
+
+上面那张表不是推演出来的，是**真跑过**的。方法可复现，上游下次真的动了就照这个来。
+
+### 演练怎么做的
+
+在一个 detached worktree 里造一个「模拟上游提交」——刻意挑**最容易撞车**的形态：
+
+| 模拟改动 | 为什么挑它 |
+|---|---|
+| 往 `TokenLedgerPanel` **函数体**里插入一个 helper（`renderUpstreamExtra`）并调用它 | 函数体正是 PR #65 **刻意避开**的区域 ⇒ 若连它都能过，说明「结构上不重叠」这个设计成立 |
+| 往 `package.json` 的 `inject` **末尾追加**一项 | 制造上面第 3 类冲突（双方同位置追加） |
+
+```powershell
+# 复现（在任何临时目录，不影响真分支）
+git worktree add --detach ..\_sim-upstream origin/master
+# …在 worktree 里改 jet-hub.js 的函数体 + package.json 的 inject，提交…
+git checkout -b _test-a <PR 分支 tip>   ; git rebase <模拟上游 tip>
+git checkout -b _test-b <integration tip>; git rebase <模拟上游 tip>
+```
+
+### 实测结果（2026-11-12）
+
+| | 冲突处 | 结果 |
+|---|---|---|
+| **A 轨**（`feat/sidebar-ledger-tab`，2 提交） | 只有 `package.json` 那 1 处 | rebase 成功；功能标记全在；**57 条守卫全绿** |
+| **B 轨**（`integration/desktop`，22 提交） | `jet-hub.js` 1 处（fork 的「单模型合并」提交与模拟上游的 helper 同位置插入）+ `package.json` 1 处 | rebase 成功；**13031 条全量绿**；导出/签名各 1 份 |
+
+两处冲突的解法都是**两边都保留**（互不依赖），没有任何「二选一」的判断。
+
+### 演练踩出来的两个真教训
+
+1. ⚠️⚠️ **`package.json` 那处原来漏记了** —— 我第一版文档只写了 `jet-hub.js` 的首尾两处。
+   是这次实测把它找出来的。**以后别只信文档，照上面那段跑一遍**（20 分钟）。
+2. ⚠️⚠️ **别用 PowerShell 写回 `jet-hub.js`**：`Set-Content -Encoding utf8` 会加 **BOM**
+   并把行尾改成 CRLF。本次实测中招一次（BOM 被写进文件）。用 `node -e` + `fs.writeFileSync`
+   按行号/正则处理，改完立刻验「前 3 字节 + 中文是否完整」：
+
+```powershell
+node -e "const fs=require('fs');const b=fs.readFileSync('plugin-src/client/jet-hub.js');console.log('BOM:',b[0]===0xEF&&b[1]===0xBB&&b[2]===0xBF,'中文:',b.toString('utf8').includes('单模型合并'))"
+```
+
+3. ⚠️ **`zcode-captcha-spawn-guard.spec.ts` 会假红**：它读 `lib/zcode-captcha.js`，
+   在只跑客户端构建的 worktree 里必然失败（报「请先执行 pnpm build」）。先
+   `tsc -p tsconfig.json` 再跑全量，否则会把它误判成 rebase 回归。
 
 ### 本 fork 专有的四条 `@container` 规则
 
