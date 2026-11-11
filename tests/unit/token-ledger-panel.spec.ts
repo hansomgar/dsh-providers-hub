@@ -659,3 +659,62 @@ describe('明细表 · 模型列格式与列宽排布', () => {
     expect(client).toMatch(/title:\s*ledgerEntryModelText\(entry\)/)
   })
 })
+
+/**
+ * 单模型账号合并 —— **实现只能有一份**（2026-11-11）。
+ *
+ * ⚠️ 这条守卫是变异验证抓出来的：把历史日树的 `renderAccountRow(...)` 换回
+ * 手写的一段 JSX 后，全部测试**依然全绿** —— 因为所有行为测试只渲染了
+ * `renderSummary`（实时卡）那条路径，历史日树那条**从来没被渲染过**。
+ *
+ * 真实后果与「provider 被画成账号」同型：同一份数据在两处显示不同结构，
+ * 用户会以为其中一份算错了（本仓库已因此复发过两次：
+ * `>1 → >0` 与 provider 类名各漏过一次历史树）。
+ *
+ * ⇒ 判据只能打在**源码结构**上：`renderAccountRow` 必须恰好被两处调用
+ * （实时卡 + 历史日树），且历史日树里**不许**再出现手写的账号头。
+ */
+describe('单模型合并 · 实现唯一性（历史日树必须复用，不许各写一份）', () => {
+  it('★★★ renderAccountRow 必须恰好有 2 个调用点（实时卡 + 历史日树）', () => {
+    // 调用形态是 `renderAccountRow(accountRow, ...)`；定义形态是
+    // `const renderAccountRow = (accountRow, keyPrefix) =>`，两者不会互相匹配。
+    const calls = client.match(/renderAccountRow\(accountRow,/g) ?? []
+    expect(calls.length, 'renderAccountRow 必须被调用 2 次：实时卡 1 次 + 历史日树 1 次')
+      .toBe(2)
+  })
+
+  it('★★★ 历史日树里不许再有手写的账号头（必须走 renderAccountRow）', () => {
+    // 历史日树那一段的锚点：`renderDayTree`
+    const dayTree = client.slice(client.indexOf('const renderDayTree'))
+    // 它内部若出现「手写的账号容器 + 账号头」就是又分叉了
+    expect(dayTree).not.toMatch(/className:\s*'dim-jh-ledgerAccount',\s*\n?\s*\},\s*\n?\s*React\.createElement\('div',\s*\{\s*className:\s*'dim-jh-ledgerAccountHead'/)
+    // 正向：历史树确实调用了共用实现
+    expect(dayTree).toMatch(/renderAccountRow\(/)
+  })
+
+  it('★★ 合并行的统计必须取**模型**的（不是账号小计）', () => {
+    // ⚠️ 单模型时两者数值相同 ⇒ 行为测试测不出来（变异实测无牙）。
+    //    只能打在实现上：`statRow` 必须优先取 `single`。
+    expect(client).toMatch(/const statRow = single \?\? accountRow\.totals;/)
+    // 反向：不许写成 always-account（那就是需求未实现）
+    expect(client).not.toMatch(/const statRow = accountRow\.totals;?\s*\n/)
+  })
+
+  it('★★★ 合并行与模型行的**数字右缘必须对齐**（实测抓到的 12px 错位）', () => {
+    // ⚠️ 真实缺陷（2026-11-11 浏览器实测）：账号色块有 `padding: 5px 8px`，
+    //    模型行原本右侧不留白 ⇒ 合并行「总处理」右缘 1132px、模型行 1144px，
+    //    纵向比数字时明显错一截。
+    //    修法：模型行也留 8px 右内边距，两边收到同一个内缘。
+    const styles = readFileSync(resolve(here, '../../plugin-src/client/jet-hub-styles.js'), 'utf8')
+    const modelRule = styles.match(/\.dim-jh-ledgerModel\s*\{([^}]*)\}/s)?.[1] ?? ''
+    expect(modelRule, '找不到 .dim-jh-ledgerModel 规则').not.toBe('')
+    // 四值 padding 的第 2 个（右）必须是 8px
+    const pad = modelRule.match(/padding:\s*([^;]+);/)?.[1]?.trim() ?? ''
+    const parts = pad.split(/\s+/)
+    const right = parts.length === 4 ? parts[1] : (parts.length >= 2 ? parts[1] : parts[0])
+    expect(right, '模型行右内边距必须与账号色块的 8px 一致，否则数字右缘对不齐').toBe('8px')
+    // 账号色块的横向内边距也必须是 8px（两边同源才好维护）
+    const headRule = styles.match(/\.dim-jh-ledgerAccountHead\s*\{([^}]*)\}/s)?.[1] ?? ''
+    expect(headRule).toMatch(/padding:\s*5px\s+8px/)
+  })
+})

@@ -31,6 +31,12 @@
  * `current`；少了它 `ref.current` 恒 `undefined`，所有「只拉一次」的闸门会静默失效）。
  */
 import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
+import { readFileSync } from 'node:fs'
+import { dirname, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
+
+/** 样式文件全文（视觉契约断言要用；`here` 供 `resolve` 定位仓库根）。 */
+const here = dirname(fileURLToPath(import.meta.url))
 
 /** hooks 槽位（跨渲染保留，下标即调用顺序）。 */
 let slots: Array<{ v?: unknown; cur?: unknown; current?: unknown }> = []
@@ -141,9 +147,13 @@ async function renderPanel(rpcCall: (m: string, p?: unknown) => Promise<unknown>
 
 /**
  * 一份**真实形状**的账本快照：
- * - 一个 provider 下**两个**账号（走 nameMap，`nickname` 优先）；
- * - 另一个 provider 下**只有一个**账号（决策 Q3：单账号也分层）；
+ * - `qodercn` 下**两个账号，各 1 个模型** ⇒ 都会走「单模型合并行」（账号 → 模型）；
+ * - `workbuddy` 下**只有一个账号**（决策 Q3：单账号也分层），且它有 **2 个模型**
+ *   ⇒ 走「不合并」分支（账号行 + 缩进的模型行）；
  * - 明细里有一笔 `accountId` 为空的请求（账户列的「未归属」格）。
+ *
+ * ⚠️ 这样一份 fixture **同时覆盖两条分支**（合并 / 不合并），
+ *    任何一条被判据写错都会立刻变红。三个账号全同构的 fixture 测不出分叉。
  */
 const SNAPSHOT = {
   channels: [
@@ -169,12 +179,15 @@ const SNAPSHOT = {
         },
         {
           provider: 'workbuddy',
-          totals: { requests: 1, totalTokens: 100 },
+          totals: { requests: 2, totalTokens: 200 },
           accounts: [
             {
               accountId: 'workbuddy-4c6e5683',
-              totals: { requests: 1, totalTokens: 100 },
-              models: [{ model: 'deepseek-v4.1-flash', requests: 1, totalTokens: 100 }],
+              totals: { requests: 2, totalTokens: 200 },
+              models: [
+                { model: 'deepseek-v4.1-flash', requests: 1, totalTokens: 100 },
+                { model: 'gpt-6-sol', requests: 1, totalTokens: 100 },
+              ],
             },
           ],
         },
@@ -297,7 +310,9 @@ describe('★ Token 面板按账号归档 · 接线层行为守卫', () => {
   it('★★ 层级样式：账号行必须挂色块类名，模型行不挂（视觉区分度的接线守卫）', async () => {
     const { rpcCall } = makeRpc()
     await renderPanel(rpcCall)
-    // 账号头是**色块分组头**（方案 A）：className 必须是 ledgerAccountHead。
+    // 账号头是**色块分组头**：className 必须是 ledgerAccountHead。
+    // 3 个账号（qodercn×2 单模型 + workbuddy×1 双模型）⇒ 3 个账号头，
+    // 单模型合并**不会减少账号头**（它只吞掉下面的模型行）。
     const heads = findAll((node) => node.props?.className === 'dim-jh-ledgerAccountHead')
     expect(heads.length).toBe(3)
     // 模型行必须是 ledgerModel（不带 Account 语义），否则样式会套错。
@@ -306,6 +321,72 @@ describe('★ Token 面板按账号归档 · 接线层行为守卫', () => {
     // ⚠️ 死代码守卫：`data-single` 已随「单账号与多账号完全一样」的决策删除。
     //    判据只认**属性键**（渲染出来的 props），不认源码注释。
     expect(findAll((node) => 'data-single' in (node.props ?? {}))).toHaveLength(0)
+  })
+
+  /**
+   * ★★★ 单模型账号合并（用户 2026-11-11 需求）
+   *
+   * 规则：账号下**只有 1 个模型** ⇒ 合并成一行 `账号 → 模型  次数  [右侧统计]`；
+   * 多个模型 ⇒ 保持现状（账号行 + 缩进模型行）。
+   *
+   * 实测本机账本：44 个账号桶里 **20 个（45.5%）** 只有 1 个模型，所以这条
+   * 分支覆盖近一半的真实数据，必须有行为级守卫。
+   */
+  it('★★★ 单模型账号必须合并成一行：账号 → 模型（带箭头与行内模型名）', async () => {
+    const { rpcCall } = makeRpc()
+    await renderPanel(rpcCall)
+    // 合并行 = 账号头里同时有「箭头」和「行内模型名」两个 span
+    const arrows = findAll((node) => node.props?.className === 'dim-jh-ledgerAccountArrow')
+    const inlineModels = findAll((node) => node.props?.className === 'dim-jh-ledgerAccountModel')
+    // qodercn 的两个账号都是单模型 ⇒ 2 条合并行
+    expect(arrows, '单模型账号必须出现 → 箭头').toHaveLength(2)
+    expect(inlineModels).toHaveLength(2)
+    const modelTexts = inlineModels.map((node) => textsIn([node]).join(''))
+    expect(modelTexts).toContain('dfmodel')
+    expect(modelTexts).toContain('qmodel_38max')
+    // ⚠️ 反向：合并后这 2 个模型**不得**再作为缩进模型行出现（否则重复计数）
+    const nested = findAll((node) => node.props?.className === 'dim-jh-ledgerModel')
+      .map((node) => textsIn([node]).join(''))
+    expect(nested.some((t) => t.includes('dfmodel'))).toBe(false)
+    expect(nested.some((t) => t.includes('qmodel_38max'))).toBe(false)
+  })
+
+  it('★★★ 多模型账号**不合并**：仍保留账号行 + 缩进的模型行', async () => {
+    const { rpcCall } = makeRpc()
+    await renderPanel(rpcCall)
+    // workbuddy 那个账号有 2 个模型 ⇒ 它的账号头里**不许**有箭头
+    const heads = findAll((node) => node.props?.className === 'dim-jh-ledgerAccountHead')
+    const wbHead = heads.find((node) => textsIn([node]).join('').includes('clover e'))
+    expect(wbHead, '找不到 workbuddy 的账号头').toBeTruthy()
+    expect(wbHead!.children.some((c) => (c as AnyNode)?.props?.className === 'dim-jh-ledgerAccountArrow'))
+      .toBe(false)
+    // 它的两个模型必须以缩进模型行出现（带 ↳ 的 .dim-jh-ledgerModel）
+    const nested = findAll((node) => node.props?.className === 'dim-jh-ledgerModel')
+      .map((node) => textsIn([node]).join(''))
+    expect(nested.some((t) => t.includes('deepseek-v4.1-flash'))).toBe(true)
+    expect(nested.some((t) => t.includes('gpt-6-sol'))).toBe(true)
+  })
+
+  it('★★ 合并行的统计信息**右对齐**（与多模型行同款布局，不是紧跟模型名）', async () => {
+    const { rpcCall } = makeRpc()
+    await renderPanel(rpcCall)
+    const head = findAll((node) => node.props?.className === 'dim-jh-ledgerAccountHead')
+      .find((node) => node.children.some((c) => (c as AnyNode)?.props?.className === 'dim-jh-ledgerAccountArrow'))
+    expect(head, '找不到合并行').toBeTruthy()
+    const classes = head!.children
+      .map((c) => (c as AnyNode)?.props?.className)
+      .filter((c) => typeof c === 'string')
+    // ⚠️ 顺序契约：[账号名] [→] [模型] [次数] [perf] [sum]
+    //    「次数」必须**在模型名之后**（属于右侧统计组），不能紧跟模型名。
+    const idx = (needle: string) => classes.indexOf(needle)
+    expect(idx('dim-jh-ledgerAccountName')).toBe(0)
+    expect(idx('dim-jh-ledgerAccountArrow')).toBe(1)
+    expect(idx('dim-jh-ledgerAccountModel')).toBe(2)
+    // 次数在模型名之后，但**必须存在**且属于右侧组
+    expect(idx('dim-jh-ledgerAccountReq')).toBeGreaterThan(idx('dim-jh-ledgerAccountModel'))
+    // 右对齐靠 CSS 的 margin-left:auto（在 AccountReq 上）实现
+    const styles = readFileSync(resolve(here, '../../plugin-src/client/jet-hub-styles.js'), 'utf8')
+    expect(styles).toMatch(/\.dim-jh-ledgerAccountReq\s*\{[^}]*margin-left:\s*auto/)
   })
 
   it('★★★ 明细表「账号」列：表头与行的顺序逐格对应（只改一处会让所有列错位）', async () => {
