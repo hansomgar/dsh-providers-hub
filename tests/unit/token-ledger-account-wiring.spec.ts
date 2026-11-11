@@ -176,7 +176,7 @@ const SNAPSHOT = {
               models: [{ model: 'qmodel_38max', requests: 1, totalTokens: 100 }],
             },
             // ⚠️ 服务端的**空账号哨兵**：`src/token-ledger.ts` 把空 accountId 归一成
-            //    `'-'`（Map 键不能缺失），原样传给客户端。界面必须显示「无账号」
+            //    `'-'`（Map 键不能缺失），原样传给客户端。界面必须显示「（未知帐号）」
             //    而不是裸 `-`（用户 2026-11-11 报障「怎么出现一条没有帐号的呢」）。
             {
               accountId: '-',
@@ -422,7 +422,7 @@ describe('★ Token 面板按账号归档 · 接线层行为守卫', () => {
     }
   })
 
-  it('★★ 空账号哨兵 `-` 必须渲染成「无账号」', async () => {
+  it('★★ 空账号哨兵 `-` 必须渲染成「（未知帐号）」', async () => {
     const { rpcCall } = makeRpc()
     await renderPanel(rpcCall)
     // fixture 里补一条 accountId 为 '-' 的账号（服务端空账号哨兵）
@@ -430,8 +430,8 @@ describe('★ Token 面板按账号归档 · 接线层行为守卫', () => {
       .map((node) => textsIn([node]).join(''))
     // 不许出现裸 `-`
     expect(labels).not.toContain('-')
-    // 应当显示「无账号」
-    expect(labels).toContain('无账号')
+    // 应当显示「（未知帐号）」
+    expect(labels).toContain('（未知帐号）')
   })
 
   it('★★★ 明细表「账号」列：表头与行的顺序逐格对应（只改一处会让所有列错位）', async () => {
