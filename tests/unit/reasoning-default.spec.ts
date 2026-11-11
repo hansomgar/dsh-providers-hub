@@ -17,15 +17,18 @@
  * 宿主看到的那份元数据」。两条口径必须分开，否则「模型默认」会被偏好污染、
  * 将来审查「这家该给什么默认」时无从对照。
  */
-import { describe, expect, it, beforeEach } from 'vitest'
+import { describe, expect, it, beforeEach, afterEach } from 'vitest'
 
 import { registerAdapterIdempotent } from '../../src/llm-register-compat.js'
 import {
   PROVIDERS_WITHOUT_REASONING,
+  configureStrongestReasoningEnabled,
   providerWithoutReasoning,
   registeredChannelIds,
   resetReasoningDefaultAnnouncements,
   strongestDeclaredEffort,
+  strongestReasoningEnabled,
+  titleEffortWhenStrongest,
   weakestThinkingEffort,
   withStrongestDefaultEffort,
   withStrongestReasoningDefault,
@@ -35,6 +38,11 @@ import { reasoningRankOf } from '../../src/reasoning-ladder.js'
 // ⚠️ 日志去重态是**进程级**的（见 `reasoning-default.ts` 的 `announced`）：
 //    用例之间必须复位，否则「只在首次打日志」那几条会随执行顺序变化。
 beforeEach(() => { resetReasoningDefaultAnnouncements() })
+
+// ⚠️ 开关也是**进程级**的模块状态：每条用例结束后复位成「未接线」（= 恒开），
+//    否则一条关掉开关的用例会污染它后面所有用例（真实污染形态，且报错看起来
+//    毫无关联）。
+afterEach(() => { configureStrongestReasoningEnabled(undefined) })
 
 // ───────────────────── ① 纯函数：最强档的选择 ─────────────────────
 
@@ -299,6 +307,77 @@ describe('日志去重：每步 prepareCall 不得刷屏', () => {
       console.info = original
     }
     expect(calls.filter((line) => line.includes('思考档位默认取最强')).length, '应只有首次一条').toBe(1)
+  })
+})
+
+// ───────────────────── ⑥ 开关：关掉 = 逐字节回到改动前 ─────────────────────
+
+/**
+ * 这一组守的是用户的**回退承诺**：「关掉后就是原来的默认效果」。
+ *
+ * ⚠️ 判据必须是 `toBe`（同一引用）而不是 `toEqual`：仓库下游有按**引用**比较
+ * 的路径（`deepFreeze` / `catalog` 缓存按数组身份失效），浅拷贝虽然内容相同，
+ * 但会让「关掉后什么都没发生」这条承诺不再逐字节成立。
+ */
+describe('★ 开关：关掉后必须完全回到改动前的行为', () => {
+  it('★★ 关掉后 resolveModel 的元数据**原样返回**（同一引用）', () => {
+    configureStrongestReasoningEnabled(() => false)
+    const input = info('high', ['low', 'high', 'max'])
+    expect(withStrongestDefaultEffort(input)).toBe(input)
+    expect(input.reasoning.defaultEffort).toBe('high')
+  })
+
+  it('★★ 关掉后两条腿经真实注册漏斗都不改写', async () => {
+    configureStrongestReasoningEnabled(() => false)
+    const { llm, registered } = fakeLlm()
+    registerAdapterIdempotent(llm, ['p'], new FakeAdapter(['low', 'high', 'max'], 'high'), () => {})
+    const adapter = registered() as {
+      resolveModel(p: string, m: string): Promise<{ reasoning?: { defaultEffort?: unknown } }>
+      prepareCall(p: string, m: string): Promise<{ model: { reasoning?: { defaultEffort?: unknown } } }>
+    }
+    expect(String((await adapter.resolveModel('p', 'm')).reasoning?.defaultEffort), '关掉后选择器应显示 high')
+      .toBe('high')
+    const call = await adapter.prepareCall('p', 'm')
+    expect(String(call.model.reasoning?.defaultEffort), '关掉后实发也应是 high').toBe('high')
+  })
+
+  it('★ 关掉后标题请求**不降档**（调用方给什么就是什么）', () => {
+    configureStrongestReasoningEnabled(() => false)
+    expect(titleEffortWhenStrongest(['light', 'high', 'extra_high'])).toBeUndefined()
+  })
+
+  it('⚠️ 打开时标题请求才降档（两者同开同关）', () => {
+    configureStrongestReasoningEnabled(() => true)
+    expect(titleEffortWhenStrongest(['light', 'high', 'extra_high'])).toBe('light')
+  })
+
+  it('⚠️ 开关是**每次现读**的：中途切换立刻生效（不需要重启）', async () => {
+    let on = true
+    configureStrongestReasoningEnabled(() => on)
+    const { llm, registered } = fakeLlm()
+    registerAdapterIdempotent(llm, ['p'], new FakeAdapter(['low', 'high', 'max'], 'high'), () => {})
+    const adapter = registered() as {
+      resolveModel(p: string, m: string): Promise<{ reasoning?: { defaultEffort?: unknown } }>
+    }
+    expect(String((await adapter.resolveModel('p', 'm')).reasoning?.defaultEffort)).toBe('max')
+    on = false
+    expect(String((await adapter.resolveModel('p', 'm')).reasoning?.defaultEffort), '关掉后立刻回到 high')
+      .toBe('high')
+    on = true
+    expect(String((await adapter.resolveModel('p', 'm')).reasoning?.defaultEffort), '再打开立刻回到 max')
+      .toBe('max')
+  })
+
+  it('⚠️ 开关回调**抛错**时按开启处理（不让功能无声消失）', () => {
+    configureStrongestReasoningEnabled(() => { throw new Error('读盘失败') })
+    expect(strongestReasoningEnabled()).toBe(true)
+    const out = withStrongestDefaultEffort(info('high', ['low', 'high', 'max']))
+    expect(String(out.reasoning.defaultEffort)).toBe('max')
+  })
+
+  it('⚠️ 未接线（缺省）时为开启', () => {
+    configureStrongestReasoningEnabled(undefined)
+    expect(strongestReasoningEnabled()).toBe(true)
   })
 })
 
