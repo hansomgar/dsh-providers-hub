@@ -2988,6 +2988,87 @@ function TokenLedgerPanel({ rpcCall, onClose }) {
     React.createElement('span', { className: 'dim-jh-ledgerModelTokens', title: tokenSummaryTooltip(modelRow) },
       tokenSummaryText(modelRow)));
 
+  /**
+   * 一个账号的渲染 —— **单模型合并、多模型分层**（用户 2026-11-11 需求）。
+   *
+   * ## 规则
+   *
+   * | 账号下的模型数 | 渲染 |
+   * |---|---|
+   * | **1 个** | **合并成一行**：`账号 → 模型  次数  [右对齐统计]`，统计取**模型的** |
+   * | ≥2 个 | 保持原样：账号行（账号统计）+ 缩进的模型行（各自统计） |
+   * | 0 个 | 只渲染账号行（防御：空 models 会被合并成分残缺行） |
+   *
+   * ## 为什么单模型要合并
+   *
+   * 实测本机账本：44 个账号桶里 **20 个（45.5%）只有 1 个模型**。
+   * 这些账号原本占两行、且两行的统计数字**完全相同**（单模型时账号小计 == 模型小计）
+   * ⇒「4 行只表达了 2 条信息」。合并后一行讲完，多模型账号不受影响。
+   *
+   * ## ⚠️ 三个必须守住的细节
+   *
+   * 1. **判据是 `models.length === 1`**，不是「有模型」也不是「账号数」。
+   * 2. **`models.length === 0` 必须走「不合并」分支**：否则会渲染出
+   *    「账号 → 」后面没有模型的残缺行。
+   * 3. **`accountId` 为空（「未归属」）也要能合并** —— 本机真实数据里就有
+   *    `direct|qodercn|`（空 accountId）+ 单模型 `dfmodel`。判据不能因为
+   *    `accountId` 是空串就跳过合并。
+   *
+   * ## ⚠️ 统计信息**右对齐**（用户 2026-11-11 第二次修正）
+   *
+   * 第一版把「21 次 / 首字 / 总处理」紧跟在模型名后面 ⇒ 与多模型时的布局不一致
+   * （多模型时这些都在最右侧、`margin-left: auto` 顶开）。
+   * 现在两者共用同一套「左侧标签 + 右侧统计」骨架：
+   *
+   * ```
+   * 单模型：[账号 → 模型]  .........  [21 次] [首字…] [总处理…]
+   * 多模型：[账号]         .........  [      ] [首字…] [总处理…]
+   *         ↳ [模型]       .........  [226 次] [首字…] [总处理…]
+   * ```
+   *
+   * @param accountRow 账号聚合行（`TokenLedgerAccountRow`）
+   * @param keyPrefix 列表 key 的前缀（实时卡用 `provider#accountId#`，历史树同）
+   */
+  const renderAccountRow = (accountRow, keyPrefix) => {
+    const models = Array.isArray(accountRow?.models) ? accountRow.models : [];
+    const single = models.length === 1 ? models[0] : null;
+    // ⚠️ 合并行的统计一律取**模型**的（单模型时与账号小计数值相同，但语义上
+    //    「这一行讲的是这个模型」更准确）。
+    const statRow = single ?? accountRow.totals;
+    return React.createElement('div', {
+      key: keyPrefix + accountRow.accountId,
+      className: 'dim-jh-ledgerAccount',
+    },
+      React.createElement('div', { className: 'dim-jh-ledgerAccountHead' },
+        React.createElement('span', { className: 'dim-jh-ledgerAccountName', title: accountRow.accountId },
+          accountLabel(accountRow.accountId, accountNames)),
+        // 单模型：`→ 模型名` 拼在账号名后面（模型名用等宽体与账号名区分开）
+        ...(single === null ? [] : [
+          React.createElement('span', { key: 'arrow', className: 'dim-jh-ledgerAccountArrow' }, '→'),
+          React.createElement('span', {
+            key: 'model',
+            className: 'dim-jh-ledgerAccountModel',
+            title: single.model,
+          }, single.model),
+        ]),
+        // 右侧统计：单一模型时才带「次数」—— 多模型时次数属于各模型行，
+        // 账号行原本就没有次数，不要凭空造一个（那会与下面的模型行重复计数）。
+        ...(single === null ? [] : [
+          React.createElement('span', {
+            key: 'req',
+            className: 'dim-jh-ledgerAccountReq',
+            title: '请求数（含失败）',
+          }, single.requests + ' 次'),
+        ]),
+        perfCell(statRow),
+        React.createElement('span', { className: 'dim-jh-ledgerAccountSum', title: tokenSummaryTooltip(statRow) },
+          tokenSummaryText(statRow))),
+      // 多模型才继续渲染缩进的模型行；单模型已合并进上面那行。
+      ...(single === null
+        ? models.map((modelRow) => renderModelRow(modelRow, keyPrefix + accountRow.accountId + '#' + modelRow.model))
+        : []));
+  };
+
   const renderSummary = () => {
     if (phase === 'loading' && snapshot === null) {
       return React.createElement('div', { className: 'dim-jh-empty' }, '正在读取 Token 用量…');
@@ -3036,18 +3117,7 @@ function TokenLedgerPanel({ rpcCall, onClose }) {
        * 表达。原先那条「单账号不缩进」的分支已删除，`data-single` 属性与它的两条
        * CSS 规则一并移除（留着就是永远不生效的死代码，下一个改样式的人会以为它还在管用）。
        */
-      return accounts.map((accountRow) => React.createElement('div', {
-        key: providerRow.provider + '#' + accountRow.accountId,
-        className: 'dim-jh-ledgerAccount',
-      },
-        React.createElement('div', { className: 'dim-jh-ledgerAccountHead' },
-          React.createElement('span', { className: 'dim-jh-ledgerAccountName', title: accountRow.accountId },
-            accountLabel(accountRow.accountId, accountNames)),
-          perfCell(accountRow.totals),
-          React.createElement('span', { className: 'dim-jh-ledgerAccountSum', title: tokenSummaryTooltip(accountRow.totals) },
-            tokenSummaryText(accountRow.totals))),
-        accountRow.models.map((modelRow) =>
-          renderModelRow(modelRow, accountRow.accountId + '#' + modelRow.model))));
+      return accounts.map((accountRow) => renderAccountRow(accountRow, accountRow.accountId + '#'));
     };
 
     return React.createElement(React.Fragment, null,
@@ -3379,17 +3449,11 @@ function TokenLedgerPanel({ rpcCall, onClose }) {
         // ⚠️ 也**不再**按账号数缩进/挂 `data-single`：样式统一，层级靠账号行色块表达
         //    （用户 2026-11-11 决策「单账号与多账号完全一样」）。历史树原先那条
         //    内联 `padding` 会把同一套色块挤歪，故一并删掉。
+        // ⚠️⚠️ 账号行**必须复用 `renderAccountRow`**，不许在这里再写一份：
+        //    单模型合并（账号 → 模型）的判据只有一处实现才可能两处同时正确。
+        //    历史日树曾经因为「各写一份」漏掉过 `>1 → >0` 与 provider 类名两次修正。
         (providerRow.accounts ?? []).length > 0
-          ? (providerRow.accounts ?? []).map((accountRow) => React.createElement('div', {
-              key: providerRow.provider + '#' + accountRow.accountId, className: 'dim-jh-ledgerAccount',
-            },
-              React.createElement('div', { className: 'dim-jh-ledgerAccountHead' },
-                React.createElement('span', { className: 'dim-jh-ledgerAccountName', title: accountRow.accountId },
-                  accountLabel(accountRow.accountId, accountNames)),
-                React.createElement('span', { className: 'dim-jh-ledgerAccountSum', title: tokenSummaryTooltip(accountRow.totals) },
-                  tokenSummaryText(accountRow.totals))),
-              accountRow.models.map((modelRow) =>
-                renderModelRow(modelRow, accountRow.accountId + '#' + modelRow.model))))
+          ? (providerRow.accounts ?? []).map((accountRow) => renderAccountRow(accountRow, ''))
           : [])))));
 
   return React.createElement('div', {

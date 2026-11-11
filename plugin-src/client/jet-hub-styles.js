@@ -1055,10 +1055,41 @@ const STYLES = `
 }
 .dim-jh-ledgerAccountSum { margin-left: auto; flex: none; font-size: 11px; line-height: 16px; font-variant-numeric: tabular-nums; color: var(--dsw-alias-label-tertiary, #8f959e); white-space: nowrap; }
 
+/* ── 单模型账号的合并行（用户 2026-11-11 需求）──
+   「账号 → 模型」拼在账号行里，**右侧统计与多模型时同款布局**：
+   次数 + 首字/速率 + 总处理全部右对齐（margin-left: auto 由第一个右侧元素吃掉）。
+   ⚠️ 顺序必须是 [账号] [→] [模型] ...... [次数] [首字…] [总处理]，
+      中间那一段靠 margin-left: auto 顶到右边 —— 与 .dim-jh-ledgerModel
+      的多模型行完全同构（那边是 [↳] [模型] ...... [次数] [首字…] [总处理]）。
+   ⚠️ 结果：单模型行与多模型行的**数字右缘对齐**，一眼能纵向比对。 */
+.dim-jh-ledgerAccountArrow {
+  flex: none; font-size: 11px; line-height: 16px;
+  color: var(--dsw-alias-label-tertiary, #8f959e); opacity: .85;
+}
+/* 模型名：等宽体 + label-secondary（比账号名淡一档，但比 tertiary 亮 ——
+   用户从 3 个方案里选的「对比度更强」那一版）。 */
+.dim-jh-ledgerAccountModel {
+  min-width: 0; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px; line-height: 16px; font-weight: 400;
+  color: var(--dsw-alias-label-secondary, #4e5969); overflow-wrap: anywhere;
+}
+/* 次数：右对齐组的第一个元素，由它吃掉 margin-left: auto 把整组推到右边。 */
+.dim-jh-ledgerAccountReq {
+  margin-left: auto; flex: none; font-size: 10.5px; line-height: 15px;
+  font-variant-numeric: tabular-nums; color: var(--dsw-alias-label-tertiary, #8f959e); white-space: nowrap;
+}
+
 /* ── 第三层：模型（内容）—— 缩进 54px，最暗最小，带 ↳ 前导 ──
    ⚠️ ↳ 用 ::before 而不是塞进文本节点：它是纯装饰，不该被复制/导出/读屏念出来
       （CSV 导出与 accountLabel 都不该看到它）。 */
-.dim-jh-ledgerModel { display: flex; align-items: baseline; gap: 8px; min-width: 0; padding: 2px 0 2px 54px; }
+/* ⚠️ 模型行（多模型账号下）:
+   左缩进 54px + **右内边距 8px**。
+   右内边距不是随便加的：账号色块（.dim-jh-ledgerAccountHead）有 padding: 5px 8px
+   ⇒ 色块内统计的右缘比色块外缘内收 8px。模型行若右侧不留 8px，它的「总处理」
+   就会比账号行的「总处理」往右多出 8px —— 实测（2026-11-11）合并行 sumRight=1132
+   而模型行 tokensRight=1144，两条右缘**对不齐**，纵向比数字时会觉得错位。
+   ⇒ 两边都收到同一个内缘，数字列才真正对齐。 */
+.dim-jh-ledgerModel { display: flex; align-items: baseline; gap: 8px; min-width: 0; padding: 2px 8px 2px 54px; }
 .dim-jh-ledgerModel::before {
   content: "↳"; flex: none; font-size: 10.5px; line-height: 15px;
   color: var(--dsw-alias-label-tertiary, #8f959e); opacity: .7;
