@@ -26,8 +26,9 @@ git remote -v          # 确认这两条
 | `master` | 上游镜像 | 与 `origin/master` **逐字节相同** | 只 `--ff-only`，绝不本地提交 |
 | `feat/rotation-start` | 会话级「轮换起点」+ 积分位次编号 | +2 提交 | **PR #59 open** |
 | `feat/ledger-account-name` | Token 面板按账号归档 | +1 提交 | 待发 PR |
-| `feat/codearts-account-name` | CodeArts 卡片显示真实 IAM 用户名 | +1 提交 | 待发 PR |
-| `integration/desktop` | **本机装的那份** = 上游 + 上面 3 个功能 + 9 个视觉/交互定制 | +15 提交 | 不发 PR |
+| `feat/codearts-account-name` | CodeArts 卡片显示真实 IAM 用户名 | +1 提交 | **PR #64 open** |
+| `feat/sidebar-ledger-tab` | 右侧栏「Token 用量」标签页 | +2 提交 | **PR #65 open**（2026-11-12 新增） |
+| `integration/desktop` | **本机装的那份** = 上游 + 上面 4 个功能 + 9 个视觉/交互定制 | +20 提交 | 不发 PR |
 
 ### 四条纪律
 
@@ -68,8 +69,8 @@ git checkout master
 git merge --ff-only origin/master
 git push fork master
 
-# ── 步骤 2：三条 PR 分支各自 rebase（它们互相独立）
-foreach ($b in @('feat/rotation-start','feat/ledger-account-name','feat/codearts-account-name')) {
+# ── 步骤 2：四条 PR 分支各自 rebase（它们互相独立）
+foreach ($b in @('feat/rotation-start','feat/ledger-account-name','feat/codearts-account-name','feat/sidebar-ledger-tab')) {
   git checkout $b
   git rebase origin/master
   # 若有冲突：按第四节处理，然后 git rebase --continue
@@ -98,7 +99,9 @@ git push --force-with-lease fork integration/desktop
 
 | 文件 | 谁会改 | 冲突时保留什么 |
 |---|---|---|
-| `plugin-src/client/jet-hub.js` | 上游 + 我的 Token 面板/视觉定制 | **我的改法**（新增块整体保留）；上游改的**同一函数之外的**部分照抄 |
+| `plugin-src/client/jet-hub.js` | 上游 + 我的 Token 面板/视觉定制 + 两种外壳 | **我的改法**（新增块整体保留）；上游改的**同一函数之外的**部分照抄。⚠️ 见下方「TokenLedgerPanel 的固定冲突点」 |
+| `plugin-src/client/jet-hub-styles.js` | 上游 + 我的 9 列/StatGroup + `@container` 块 | 两边都要（我的是**纯追加**，落在 `.dim-jh-ledgerPagination` 之后） |
+| `plugin-src/client/ledger-tab.js` | **纯新增**（PR #65 带来） | 上游不会动它，冲突概率 0 |
 | `src/jet-hub-rpc.ts` | 上游 + 轮换起点 + codearts 显示名 | 三条腿**都在**：上游的新 case、`account.getRotation`/`setRotation`、`enrichCodeartsIdentity` |
 | `src/index.ts` | 上游 + 最强思考档开关 | 上游的 import 与**我的 13 行接线**都要（位置：`configureDeadModelStore(ctx)` 之后） |
 | `AGENTS.md` | 上游 + 最强思考档 / codearts 显示名两条索引 | **两段摘要都留**（上游那行 + 我的两段） |
@@ -130,6 +133,51 @@ pnpm run build:all
 ⚠️ **已确认的既有失败（不是回归）**：`tests/unit/autoclawintl-zai-wiring.spec.ts`
 的「失败后必须还能重试成功」= `UND_ERR_SOCKET`（真发本机 HTTP `127.0.0.1:18432`），
 **上游基线 `5581d40` 同样红**（2026-11-12 在干净 worktree 上复现过）。
+
+---
+
+## 四之二、`TokenLedgerPanel` 的**固定冲突点**（PR #65 / 每次同步必看）
+
+这是本 fork 目前**唯一会稳定冲突**的地方 —— 每次 rebase / cherry-pick 大概率都要碰它。
+共两处，都在函数的**首尾**，且都有明确的处置规则：
+
+| # | 冲突形态 | 处置 | 自证 |
+|---|---|---|---|
+| 1 | 函数**签名上方**：上游没有任何东西，但 fork 在 `TokenLedgerPanel` 之前插了两个常量（`LEDGER_ENTRY_COLUMNS` / `LEDGER_ENTRY_CSV_COLUMNS`），而 PR #65 在签名上方加了一段注释 ⇒ 两边落在同一位置 | **两边都保留**：fork 的常量与说明在前，PR 的注释 + `function TokenLedgerPanel({ rpcCall, onClose, chrome = 'modal' }) {` 在后。⚠️ 解完确认**只有一个** `function TokenLedgerPanel(` | `grep -c "function TokenLedgerPanel(" plugin-src/client/jet-hub.js` = **1** |
+| 2 | 文件尾的 `__tokenLedgerPanelForTest` **导出注释**：fork 与 PR 各写了一段 | **合并成一段**（fork 的「为什么需要导出」技术理由 + PR 的「两种外壳的支点」）。⚠️ 导出语句本身只留**一行** | `grep -c "export const __tokenLedgerPanelForTest" plugin-src/client/jet-hub.js` = **1** |
+
+### 为什么只在这两处（刻意设计的）
+
+PR #65 对 `jet-hub.js` 的改动**全部落在 `TokenLedgerPanel` 的首尾**：签名 1 行、
+`if (chrome === 'pane') { … }` 早退块（在 modal `return` 之前）、文件尾 1 行导出。
+**函数体一行未动**，而 fork 的 9 个视觉定制提交全在函数体里 ⇒ 二者结构性不重叠。
+
+### 解完必查的三件事
+
+```powershell
+cd E:\Data\data_dsh\2026\dsh-agent-proxy\dsh-providers-hub
+# ① 导出只有一行、签名只有一个
+(Select-String -Path plugin-src/client/jet-hub.js -Pattern 'export const __tokenLedgerPanelForTest').Count   # 必须 1
+(Select-String -Path plugin-src/client/jet-hub.js -Pattern 'function TokenLedgerPanel\(').Count              # 必须 1
+# ② 冲突标记归零
+Select-String -Path plugin-src/client/jet-hub.js -Pattern '^(<<<<<<<|=======|>>>>>>>)'
+# ③ **modal 分支必须保持逐字节等于上游**（这条最容易被「顺手重构」破坏）
+npx vitest run tests/unit/token-ledger-panel.spec.ts    # 32 条，里面有按源码切窗口的断言
+```
+
+⚠️⚠️ **第 ③ 条是硬约束**：`token-ledger-panel.spec.ts` 用
+`client.slice(modalIdx, client.indexOf('dim-jh-modalBody', modalIdx))` 切窗口断言
+modal 的 `dim-jh-modalHint` 与 `createElement('p', {…title:`。**别**把 modal 的 JSX
+抽成变量「为了共用」—— 那会让窗口切空、**上游自己的用例当场变红**，而症状看起来
+像「测试坏了」。
+
+### 本 fork 专有的四条 `@container` 规则
+
+`jet-hub-styles.js` 的 `@container (max-width: 720px)` 块里，**后四条是 fork 专有的**
+（9 列的 StatGroup 300px / 账号 14px / 模型 26px / 账号列 72px + 表格横向滚动）；
+PR #65 只带前七条（8 列口径）。cherry-pick 后**若发现 fork 那四条丢了**，
+按 PR 描述里那七条的风格补回即可 —— 它们只作用于 `.dim-jh-ledgerPaneBody` 之内，
+**不影响 modal 弹窗**（弹窗宽 960px，那套 9 列正是为它调的）。
 
 ---
 

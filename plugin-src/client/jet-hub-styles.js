@@ -1248,6 +1248,27 @@ const STYLES = `
   .dim-jh-ledgerPaneBody .dim-jh-ledgerSearch { flex-basis: 100%; }
   .dim-jh-ledgerPaneBody .dim-jh-ledgerSelect { flex: 1 1 30%; max-width: none; }
   .dim-jh-ledgerPaneBody .dim-jh-ledgerHeatmapWrap { overflow-x: auto; }
+  /* ══════════════════════════════════════════════════════════════════════════
+     ⚠️⚠️ 以下四条是**本 fork 专有**的（PR #65 里没有，也不会进 PR）。
+
+     上游那版明细表是 **8 列**、没有 dim-jh-ledgerTableScroll、没有
+     dim-jh-ledgerStatGroup、账号层也不缩进；本 fork 把明细表加到 **9 列**
+     （多了「账号」172px），并把统计信息收进固定宽 StatGroup。同一块面板塞进
+     右侧栏（视口 45%，1440 视口约 648px）时，这四处各自都会撑破，故必须收窄。
+
+     ⚠️ 它们只作用于 dim-jh-ledgerPaneBody 之内 —— **modal 弹窗不受影响**：
+     弹窗宽 960px，那套 9 列 + StatGroup 正是为它实测调出来的（改这里等于改弹窗观感）。
+     ⚠️ 本文件整体是 JS 模板字符串：注释里**禁止反引号**。本轮在这块注释里
+     又踩了一次（写类名时习惯性加了反引号 ⇒ 模板提前闭合 ⇒ 整份 CSS 变成
+     非法 JS，esbuild 与 tsc 各自报一串看不懂的 Cannot find name）。
+     ══════════════════════════════════════════════════════════════════════════ */
+  .dim-jh-ledgerPaneBody .dim-jh-ledgerStatGroup { width: 300px; gap: 6px; }
+  .dim-jh-ledgerPaneBody .dim-jh-ledgerStatGroup .dim-jh-ledgerPerf { max-width: 132px; overflow: hidden; text-overflow: ellipsis; }
+  .dim-jh-ledgerPaneBody .dim-jh-ledgerAccount { margin-left: 14px; }
+  .dim-jh-ledgerPaneBody .dim-jh-ledgerModel { padding: 2px 0 2px 26px; }
+  .dim-jh-ledgerPaneBody .dim-jh-ledgerTable .dim-jh-ledgerEntryAccount { max-width: 72px; }
+  /* 9 列定宽必然超宽 ⇒ 横向滚动，而不是压缩各列（压缩会让数字列对不齐）。 */
+  .dim-jh-ledgerPaneBody .dim-jh-ledgerTableScroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
 }
 @media (max-width: 700px) {
   .dim-jh-modal--ledger { padding: 14px 12px; }
