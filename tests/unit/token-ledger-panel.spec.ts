@@ -717,4 +717,53 @@ describe('单模型合并 · 实现唯一性（历史日树必须复用，不许
     const headRule = styles.match(/\.dim-jh-ledgerAccountHead\s*\{([^}]*)\}/s)?.[1] ?? ''
     expect(headRule).toMatch(/padding:\s*5px\s+8px/)
   })
+
+  it('★★★ 账号行的「总处理」只有**单模型**才加粗（多模型账号合计保持不加粗）', () => {
+    // ⚠️ 用户 2026-11-11 第四次修正：「当帐号行有两个模型及以上时，帐号行的总处理是
+    //    不加粗的，保持原来的就行…我只要每个模型的总处理结果是加粗的就行，
+    //    这样方便我一眼看到每个帐号下每个模型的请求总量」。
+    //
+    // | 行 | 类名 | 视觉 |
+    // |---|---|---|
+    // | 单模型合并行 | ledgerModelTokens | 加粗亮白 |
+    // | 多模型账号行 | ledgerAccountSum  | 灰、不加粗 |
+    //
+    // ⇒ 判据必须是**条件切换**，不能无条件用其中一个。
+    expect(client).toMatch(/className:\s*single === null \? 'dim-jh-ledgerAccountSum' : 'dim-jh-ledgerModelTokens'/)
+    // 反向：不许无条件 ModelTokens（会让账号合计看起来像单个模型的用量）
+    expect(client).not.toMatch(/className:\s*'dim-jh-ledgerModelTokens',\s*\n\s*title:\s*tokenSummaryTooltip\(statRow\)/)
+  })
+
+  it('★★★ 统计信息必须包在固定宽的 StatGroup 里（否则「次数」列参差不齐）', () => {
+    // ⚠️ 用户 2026-11-11 第三次修正：「统计信息（红框内）要放在行中间」。
+    //    改前每个统计格各自 margin-left:auto ⇒ 被推成各自最右，而内容宽度不同
+    //    ⇒ 「次数」起始位置 4 种（714/720/726/732），账号名后留一大片空白。
+    //    修法：整组固定 460px、组内左对齐 ⇒ 实测全部 510px。
+    const styles = readFileSync(resolve(here, '../../plugin-src/client/jet-hub-styles.js'), 'utf8')
+    const group = styles.match(/\.dim-jh-ledgerStatGroup\s*\{([^}]*)\}/s)?.[1] ?? ''
+    expect(group, '缺少 .dim-jh-ledgerStatGroup 规则').not.toBe('')
+    expect(group).toMatch(/width:\s*460px/)
+    expect(group).toMatch(/margin-left:\s*auto/)
+    // ⚠️ 组内的「次数」不许再各自 auto（那会退回参差不齐）
+    const req = styles.match(/\.dim-jh-ledgerAccountReq\s*\{([^}]*)\}/s)?.[1] ?? ''
+    expect(req).not.toMatch(/margin-left:\s*auto/)
+    // 渲染层：账号行与模型行都必须包这个组
+    expect(client).toMatch(/className:\s*'dim-jh-ledgerStatGroup'/)
+    const groups = client.match(/className: 'dim-jh-ledgerStatGroup'/g) ?? []
+    expect(groups.length, '账号行与模型行各一处 StatGroup').toBe(2)
+  })
+
+  it('★★★ 服务端的 「-」 空账号哨兵必须显示为「无账号」，不能是裸 `-`', () => {
+    // ⚠️ 用户 2026-11-11 报障：「怎么出现一条没有帐号的呢」——界面上有一行账号叫 `-`。
+    // 根因：`src/token-ledger.ts` 两处（内存聚合 + 落盘日聚合）把空 accountId 归一成
+    // `'-'`（Map 键不能缺失），然后原样传给客户端。
+    // ⚠️ 而**明细**路径在同样情形下是**空串** ⇒ 两种形态都要认。
+    expect(accountLabel('-')).toBe('无账号')
+    // 空串仍是「未归属」（明细路径的形态，既有契约不许改）
+    expect(accountLabel('')).toBe('未归属')
+    // 正常 id 不受影响
+    expect(accountLabel('qodercn-c5a414d5')).toBe('qodercn-c5a414d5')
+    // nameMap 里若有 '-' 的映射也不该覆盖哨兵语义
+    expect(accountLabel('-', new Map([['-', '不该显示']]))).toBe('无账号')
+  })
 })

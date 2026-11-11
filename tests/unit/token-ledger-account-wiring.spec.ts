@@ -175,6 +175,14 @@ const SNAPSHOT = {
               totals: { requests: 1, totalTokens: 100 },
               models: [{ model: 'qmodel_38max', requests: 1, totalTokens: 100 }],
             },
+            // ⚠️ 服务端的**空账号哨兵**：`src/token-ledger.ts` 把空 accountId 归一成
+            //    `'-'`（Map 键不能缺失），原样传给客户端。界面必须显示「无账号」
+            //    而不是裸 `-`（用户 2026-11-11 报障「怎么出现一条没有帐号的呢」）。
+            {
+              accountId: '-',
+              totals: { requests: 1, totalTokens: 50 },
+              models: [{ model: 'dfmodel', requests: 1, totalTokens: 50 }],
+            },
           ],
         },
         {
@@ -303,8 +311,8 @@ describe('★ Token 面板按账号归档 · 接线层行为守卫', () => {
     expect(heads).toContain('clover e')
     // 且它**没有**兄弟账号行 —— 证明这是「单账号」那一格，不是多账号碰巧命中。
     expect(heads.filter((t) => t === 'clover e')).toHaveLength(1)
-    // 账号行数量 = 3（qodercn 两个 + workbuddy 一个），不多不少。
-    expect(accountRows).toHaveLength(3)
+    // 账号行数量 = 4（qodercn 三个：两个真账号 + 一个空账号哨兵 -；workbuddy 一个），不多不少。
+    expect(accountRows).toHaveLength(4)
   })
 
   it('★★ 层级样式：账号行必须挂色块类名，模型行不挂（视觉区分度的接线守卫）', async () => {
@@ -314,7 +322,7 @@ describe('★ Token 面板按账号归档 · 接线层行为守卫', () => {
     // 3 个账号（qodercn×2 单模型 + workbuddy×1 双模型）⇒ 3 个账号头，
     // 单模型合并**不会减少账号头**（它只吞掉下面的模型行）。
     const heads = findAll((node) => node.props?.className === 'dim-jh-ledgerAccountHead')
-    expect(heads.length).toBe(3)
+    expect(heads.length).toBe(4)
     // 模型行必须是 ledgerModel（不带 Account 语义），否则样式会套错。
     const models = findAll((node) => node.props?.className === 'dim-jh-ledgerModel')
     expect(models.length).toBeGreaterThan(0)
@@ -339,8 +347,8 @@ describe('★ Token 面板按账号归档 · 接线层行为守卫', () => {
     const arrows = findAll((node) => node.props?.className === 'dim-jh-ledgerAccountArrow')
     const inlineModels = findAll((node) => node.props?.className === 'dim-jh-ledgerAccountModel')
     // qodercn 的两个账号都是单模型 ⇒ 2 条合并行
-    expect(arrows, '单模型账号必须出现 → 箭头').toHaveLength(2)
-    expect(inlineModels).toHaveLength(2)
+    expect(arrows, '单模型账号必须出现 → 箭头').toHaveLength(3)
+    expect(inlineModels).toHaveLength(3)
     const modelTexts = inlineModels.map((node) => textsIn([node]).join(''))
     expect(modelTexts).toContain('dfmodel')
     expect(modelTexts).toContain('qmodel_38max')
@@ -367,26 +375,63 @@ describe('★ Token 面板按账号归档 · 接线层行为守卫', () => {
     expect(nested.some((t) => t.includes('gpt-6-sol'))).toBe(true)
   })
 
-  it('★★ 合并行的统计信息**右对齐**（与多模型行同款布局，不是紧跟模型名）', async () => {
+  it('★★★ 统计信息包在 StatGroup 里，且「次数」在组内第一格（不是紧跟模型名）', async () => {
     const { rpcCall } = makeRpc()
     await renderPanel(rpcCall)
-    const head = findAll((node) => node.props?.className === 'dim-jh-ledgerAccountHead')
-      .find((node) => node.children.some((c) => (c as AnyNode)?.props?.className === 'dim-jh-ledgerAccountArrow'))
-    expect(head, '找不到合并行').toBeTruthy()
-    const classes = head!.children
-      .map((c) => (c as AnyNode)?.props?.className)
-      .filter((c) => typeof c === 'string')
-    // ⚠️ 顺序契约：[账号名] [→] [模型] [次数] [perf] [sum]
-    //    「次数」必须**在模型名之后**（属于右侧统计组），不能紧跟模型名。
-    const idx = (needle: string) => classes.indexOf(needle)
-    expect(idx('dim-jh-ledgerAccountName')).toBe(0)
-    expect(idx('dim-jh-ledgerAccountArrow')).toBe(1)
-    expect(idx('dim-jh-ledgerAccountModel')).toBe(2)
-    // 次数在模型名之后，但**必须存在**且属于右侧组
-    expect(idx('dim-jh-ledgerAccountReq')).toBeGreaterThan(idx('dim-jh-ledgerAccountModel'))
-    // 右对齐靠 CSS 的 margin-left:auto（在 AccountReq 上）实现
+    const heads = findAll((node) => node.props?.className === 'dim-jh-ledgerAccountHead')
+    expect(heads.length).toBeGreaterThan(0)
+    for (const head of heads) {
+      const classes = head.children.map((c) => (c as AnyNode)?.props?.className).filter(Boolean)
+      // 左侧：[账号名]（+ 单模型时的箭头/模型名），右侧整组统计
+      expect(classes[0]).toBe('dim-jh-ledgerAccountName')
+      expect(classes, '账号头必须以 StatGroup 结尾').toContain('dim-jh-ledgerStatGroup')
+      // ⚠️ 次数/首字/总处理**不再平铺**在账号头里 —— 它们收进 StatGroup 内
+      expect(classes).not.toContain('dim-jh-ledgerAccountReq')
+    }
+    // StatGroup 内部顺序：次数 → perf → 总处理
+    const groups = findAll((node) => node.props?.className === 'dim-jh-ledgerStatGroup')
+    expect(groups.length).toBeGreaterThan(0)
+    for (const g of groups) {
+      const inner = g.children.map((c) => (c as AnyNode)?.props?.className).filter(Boolean)
+      const idxReq = inner.findIndex((c) => c === 'dim-jh-ledgerAccountReq' || c === 'dim-jh-ledgerModelReq')
+      const idxTok = inner.findIndex((c) => c === 'dim-jh-ledgerModelTokens' || c === 'dim-jh-ledgerAccountSum')
+      expect(idxReq, '组内第一格必须是次数').toBe(0)
+      expect(idxTok, '总处理必须在次数之后').toBeGreaterThan(idxReq)
+    }
     const styles = readFileSync(resolve(here, '../../plugin-src/client/jet-hub-styles.js'), 'utf8')
-    expect(styles).toMatch(/\.dim-jh-ledgerAccountReq\s*\{[^}]*margin-left:\s*auto/)
+    expect(styles).toMatch(/\.dim-jh-ledgerStatGroup\s*\{[^}]*width:\s*460px/)
+  })
+
+  it('★★★ 账号行的「总处理」：单模型加粗、多模型不加粗', async () => {
+    const { rpcCall } = makeRpc()
+    await renderPanel(rpcCall)
+    const heads = findAll((node) => node.props?.className === 'dim-jh-ledgerAccountHead')
+    for (const head of heads) {
+      const group = head.children.find((c) => (c as AnyNode)?.props?.className === 'dim-jh-ledgerStatGroup')
+      expect(group, '账号头缺少 StatGroup').toBeTruthy()
+      const inner = (group as AnyNode).children.map((c) => (c as AnyNode)?.props?.className).filter(Boolean)
+      // 单模型（有箭头）⇒ ModelTokens（加粗）；多模型 ⇒ AccountSum（不加粗）
+      const isMerged = head.children.some((c) => (c as AnyNode)?.props?.className === 'dim-jh-ledgerAccountArrow')
+      if (isMerged) {
+        expect(inner, '单模型合并行的总处理必须加粗（ModelTokens）').toContain('dim-jh-ledgerModelTokens')
+        expect(inner).not.toContain('dim-jh-ledgerAccountSum')
+      } else {
+        expect(inner, '多模型账号合计必须不加粗（AccountSum）').toContain('dim-jh-ledgerAccountSum')
+        expect(inner).not.toContain('dim-jh-ledgerModelTokens')
+      }
+    }
+  })
+
+  it('★★ 空账号哨兵 `-` 必须渲染成「无账号」', async () => {
+    const { rpcCall } = makeRpc()
+    await renderPanel(rpcCall)
+    // fixture 里补一条 accountId 为 '-' 的账号（服务端空账号哨兵）
+    const labels = findAll((node) => node.props?.className === 'dim-jh-ledgerAccountName')
+      .map((node) => textsIn([node]).join(''))
+    // 不许出现裸 `-`
+    expect(labels).not.toContain('-')
+    // 应当显示「无账号」
+    expect(labels).toContain('无账号')
   })
 
   it('★★★ 明细表「账号」列：表头与行的顺序逐格对应（只改一处会让所有列错位）', async () => {

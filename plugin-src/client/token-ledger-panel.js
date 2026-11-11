@@ -267,6 +267,22 @@ export function ledgerSubtitle() {
  */
 export function accountLabel(accountId, nameMap) {
   if (typeof accountId !== 'string' || accountId.length === 0) return '未归属';
+  /**
+   * ⚠️⚠️ **`'-'` 是服务端的「空账号」哨兵，不是真账号 id**（用户 2026-11-11 报障：
+   * 界面上出现了一行账号叫 `-`）。
+   *
+   * 来源（`src/token-ledger.ts` 两处，内存聚合与落盘日聚合各一份）：
+   *
+   * ```ts
+   * const accountKey = entry.accountId !== undefined && entry.accountId.length > 0
+   *   ? entry.accountId : '-'        // ← Map 键不能缺失，故用 '-' 占位
+   * ```
+   *
+   * 然后 `TokenLedgerAccountRow.accountId` 就原样带着这个 `'-'` 传给客户端。
+   * ⚠️ 而**明细**（`TokenLedgerEntry.accountId`）在同样情形下是**空串** ——
+   * 两条数据路径的空值形态不同，`accountLabel` 必须**同时认这两种**。
+   */
+  if (accountId === '-') return '无账号';
   const mapped = nameMap instanceof Map ? nameMap.get(accountId) : nameMap?.[accountId];
   if (typeof mapped === 'string' && mapped.length > 0) return mapped;
   return accountId;

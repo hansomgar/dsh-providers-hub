@@ -2978,15 +2978,24 @@ function TokenLedgerPanel({ rpcCall, onClose }) {
     className: 'dim-jh-ledgerPerf', title: avgPerfDetailTooltip(row),
   }, avgPerfText(row));
 
+  /**
+   * 模型行（多模型账号下的缩进行）。
+   *
+   * ⚠️ 右侧统计**必须包同一个 `dim-jh-ledgerStatGroup`**（与账号行同宽），
+   * 否则模型行的「次数」与账号行的「次数」不在同一竖线上 —— 那正是本次要修的
+   * 「参差不齐」。两者的区别只有左半部分（账号行有账号名/箭头/模型名，模型行有 ↳）。
+   */
   const renderModelRow = (modelRow, key) => React.createElement('div', {
     key, className: 'dim-jh-ledgerModel',
   },
     React.createElement('span', { className: 'dim-jh-ledgerModelName', title: modelRow.model }, modelRow.model),
-    React.createElement('span', { className: 'dim-jh-ledgerModelReq', title: '请求数（含失败）' },
-      modelRow.requests + ' 次'),
-    perfCell(modelRow),
-    React.createElement('span', { className: 'dim-jh-ledgerModelTokens', title: tokenSummaryTooltip(modelRow) },
-      tokenSummaryText(modelRow)));
+    React.createElement('span', { className: 'dim-jh-ledgerStatGroup' },
+      React.createElement('span', { className: 'dim-jh-ledgerModelReq', title: '请求数（含失败）' },
+        modelRow.requests + ' 次'),
+      perfCell(modelRow),
+      // ⚠️ 模型行的「总处理」**加粗**：用户要「一眼看到每个帐号下每个模型的请求总量」。
+      React.createElement('span', { className: 'dim-jh-ledgerModelTokens', title: tokenSummaryTooltip(modelRow) },
+        tokenSummaryText(modelRow))));
 
   /**
    * 一个账号的渲染 —— **单模型合并、多模型分层**（用户 2026-11-11 需求）。
@@ -3032,9 +3041,31 @@ function TokenLedgerPanel({ rpcCall, onClose }) {
   const renderAccountRow = (accountRow, keyPrefix) => {
     const models = Array.isArray(accountRow?.models) ? accountRow.models : [];
     const single = models.length === 1 ? models[0] : null;
-    // ⚠️ 合并行的统计一律取**模型**的（单模型时与账号小计数值相同，但语义上
-    //    「这一行讲的是这个模型」更准确）。
+    /**
+     * 统计行的取值：
+     * - **单模型**：取**模型**的（单模型时与账号小计数值相同，但「这一行讲的是
+     *   这个模型」语义更准）；
+     * - **多模型**：取**账号**的（这一行讲的是账号合计）。
+     */
     const statRow = single ?? accountRow.totals;
+    /**
+     * ⚠️⚠️ 请求次数**两种情形都显示**，且位置相同（用户 2026-11-11 需求：
+     * 「多模型的统计信息都像单模型一样，放在行中间吧」）。
+     *
+     * 改前多模型账号行**没有**次数（只有首字/速率 + 总处理），单模型行有 ⇒
+     * 同一棵树里「有次数」和「没次数」两种排法，右对齐的数字列参差不齐。
+     * 现在统一成：
+     *
+     * ```
+     * 单模型：[账号 → 模型] ...... [21 次] [首字…] [总处理]
+     * 多模型：[账号]         ...... [36 次] [首字…] [总处理]
+     *         ↳ [模型]       ...... [226 次] [首字…] [总处理]
+     * ```
+     *
+     * ⚠️ 多模型的次数 = **账号合计**（`accountRow.totals.requests`），不是某个模型
+     * 的 —— 它是那一行的「这一组一共发了多少次」，与右侧的账号合计口径一致。
+     */
+    const reqRow = single ?? accountRow.totals;
     return React.createElement('div', {
       key: keyPrefix + accountRow.accountId,
       className: 'dim-jh-ledgerAccount',
@@ -3051,18 +3082,51 @@ function TokenLedgerPanel({ rpcCall, onClose }) {
             title: single.model,
           }, single.model),
         ]),
-        // 右侧统计：单一模型时才带「次数」—— 多模型时次数属于各模型行，
-        // 账号行原本就没有次数，不要凭空造一个（那会与下面的模型行重复计数）。
-        ...(single === null ? [] : [
+        /**
+         * ⚠️⚠️ 右侧统计包成**固定宽度的组**（`dim-jh-ledgerStatGroup`）。
+         *
+         * 用户 2026-11-11 第三次修正：「统计信息（红框内）要放在行中间」。
+         *
+         * 改前靠 `margin-left: auto` 把每一格各自推到最右 ⇒ 因为每组内容宽度不同，
+         * 「次数」一列的**起始位置参差不齐**（实测 6 行的起始 x 是
+         * 714 / 720 / 726 / 726 / 732 / 720 —— 4 种位置），账号名后面留一大片空白。
+         *
+         * 修法：整组给固定宽度 460px，`margin-left: auto` 推到右边，**组内左对齐**
+         * ⇒ 所有行的「次数」都从同一条竖线开始（实测全部 510px）。
+         *
+         * ```
+         * [账号 → 模型]              | 338 次  首字 …  总处理 …
+         * [账号]                     | 90 次   首字 …  总处理 …   ← 同一竖线
+         *   ↳ [模型]                 | 75 次   首字 …  总处理 …
+         * ```
+         */
+        React.createElement('span', { className: 'dim-jh-ledgerStatGroup' },
           React.createElement('span', {
             key: 'req',
             className: 'dim-jh-ledgerAccountReq',
             title: '请求数（含失败）',
-          }, single.requests + ' 次'),
-        ]),
-        perfCell(statRow),
-        React.createElement('span', { className: 'dim-jh-ledgerAccountSum', title: tokenSummaryTooltip(statRow) },
-          tokenSummaryText(statRow))),
+          }, reqRow.requests + ' 次'),
+          perfCell(statRow),
+          /**
+           * ⚠️⚠️ **只有「单个模型」的 Total 才加粗**（用户 2026-11-11 第四次修正）：
+           * 「当帐号行有两个模型及以上时，帐号行的总处理是不加粗的，保持原来的就行…
+           *  我只要每个模型的总处理结果是加粗的就行，这样方便我一眼看到每个帐号下
+           *  每个模型的请求总量」。
+           *
+           * | 行 | 语义 | 样式 |
+           * |---|---|---|
+           * | 单模型合并行 | 就是那个模型的用量 | `ledgerModelTokens`（**加粗亮白**）|
+           * | 多模型账号行 | 账号合计（不代表任何单个模型） | `ledgerAccountSum`（灰，不加粗）|
+           * | 缩进模型行 | 单个模型的用量 | `ledgerModelTokens`（**加粗亮白**）|
+           *
+           * ⇒ 判据是 `single === null`（多模型）→ 用 AccountSum；否则用 ModelTokens。
+           * ⚠️ 别为了「账号行也统一」把它改成无条件 ModelTokens —— 那会让账号合计看起来
+           *    像一个模型的用量，正是用户这次要修掉的。
+           */
+          React.createElement('span', {
+            className: single === null ? 'dim-jh-ledgerAccountSum' : 'dim-jh-ledgerModelTokens',
+            title: tokenSummaryTooltip(statRow),
+          }, tokenSummaryText(statRow)))),
       // 多模型才继续渲染缩进的模型行；单模型已合并进上面那行。
       ...(single === null
         ? models.map((modelRow) => renderModelRow(modelRow, keyPrefix + accountRow.accountId + '#' + modelRow.model))
