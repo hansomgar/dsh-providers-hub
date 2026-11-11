@@ -753,17 +753,17 @@ describe('单模型合并 · 实现唯一性（历史日树必须复用，不许
     expect(groups.length, '账号行与模型行各一处 StatGroup').toBe(2)
   })
 
-  it('★★★ 服务端的 「-」 空账号哨兵必须显示为「无账号」，不能是裸 `-`', () => {
+  it('★★★ 服务端的 「-」 空账号哨兵必须显示为「（未知帐号）」，不能是裸 `-`', () => {
     // ⚠️ 用户 2026-11-11 报障：「怎么出现一条没有帐号的呢」——界面上有一行账号叫 `-`。
     // 根因：`src/token-ledger.ts` 两处（内存聚合 + 落盘日聚合）把空 accountId 归一成
     // `'-'`（Map 键不能缺失），然后原样传给客户端。
     // ⚠️ 而**明细**路径在同样情形下是**空串** ⇒ 两种形态都要认。
-    expect(accountLabel('-')).toBe('无账号')
+    expect(accountLabel('-')).toBe('（未知帐号）')
     // 空串仍是「未归属」（明细路径的形态，既有契约不许改）
     expect(accountLabel('')).toBe('未归属')
     // 正常 id 不受影响
     expect(accountLabel('qodercn-c5a414d5')).toBe('qodercn-c5a414d5')
     // nameMap 里若有 '-' 的映射也不该覆盖哨兵语义
-    expect(accountLabel('-', new Map([['-', '不该显示']]))).toBe('无账号')
+    expect(accountLabel('-', new Map([['-', '不该显示']]))).toBe('（未知帐号）')
   })
 })

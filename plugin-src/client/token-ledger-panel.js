@@ -282,7 +282,22 @@ export function accountLabel(accountId, nameMap) {
    * ⚠️ 而**明细**（`TokenLedgerEntry.accountId`）在同样情形下是**空串** ——
    * 两条数据路径的空值形态不同，`accountLabel` 必须**同时认这两种**。
    */
-  if (accountId === '-') return '无账号';
+  /**
+   * ⚠️ 文案是**「（未知帐号）」带全角括号**（用户 2026-11-11 最终定稿）。
+   *
+   * 沿革：`-`（裸哨兵）→ `未归属` → `（无账号）` → **`（未知帐号）`**。
+   *
+   * 为什么最终选「未知帐号」而不是「无账号」：
+   * - 「无账号」读起来像「这个 provider 一个账号都没有」，但它实际讲的是
+   *   **这一笔请求的账号没记录到**（凭据解析没回报），provider 底下往往还有别的号；
+   * - 「未知帐号」与既有术语一致：账本注释里对空 accountId 的措辞就是
+   *   「未知账号与『没有账号体系』不能混成一个假 id」。
+   *
+   * 括号的意义：它是**占位符**而不是真实账号名。不加括号时用户会以为
+   * 「未知帐号」是某个账号的昵称（真实报障：那行看起来像个正常账号）。
+   * ⚠️ 用**全角括号**（`（）`）而不是半角：界面其余占位文案都用全角。
+   */
+  if (accountId === '-') return '（未知帐号）';
   const mapped = nameMap instanceof Map ? nameMap.get(accountId) : nameMap?.[accountId];
   if (typeof mapped === 'string' && mapped.length > 0) return mapped;
   return accountId;
