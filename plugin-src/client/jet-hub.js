@@ -3241,7 +3241,37 @@ function TokenLedgerPanel({ rpcCall, onClose, chrome = 'modal' }) {
       if (entryChannel !== 'all' && entry.channel !== entryChannel) return false;
       if (entryStatus === 'success' && entry.error !== undefined) return false;
       if (entryStatus === 'error' && entry.error === undefined) return false;
-      if (query && !String(entry.model ?? '').toLowerCase().includes(query)) return false;
+      /**
+       * 搜索同时匹配**模型**与**账号**（用户 2026-11-12 要求：红框那个输入框
+       * 原先只能筛模型，「做成可以筛选模型或帐号」）。
+       *
+       * ⚠️⚠️ 账号这边**必须两条腿都在**：`accountId` 与 `accountLabel(...)`。
+       * 这一点有**实测反证**（2026-11-12）：
+       * - 只查 `accountLabel` ⇒ 我一度以为够了（"没有昵称时它回落 id"），
+       *   但**有昵称时它就返回昵称、把 id 吞掉了** ⇒ 输入 `bbbb2222` 得到 0 条，
+       *   用例当场变红。故 id 必须单独查。
+       * - 只查 `accountId` ⇒ 用户照着屏幕敲昵称（「张三」）搜不到，且不报错 ——
+       *   这是最难自证的形态，也是当初要求改这个框的直接原因。
+       *
+       * ⚠️ 依赖数组里**必须有 `accountNames`**：它是异步从 `account.list` 回来的，
+       * 不进依赖 ⇒ 名字到了但搜索索引还是旧的（输入昵称仍 0 条）。
+       * ⚠️ 但这条**无法用当前单测替身验证**：替身的 `useMemo` 是 `fn()`
+       * （每次重渲染都重算），依赖数组根本不参与 ⇒ 只能靠代码审查守。
+       */
+      if (query) {
+        /**
+         * ⚠️⚠️ **模型这边必须用 `ledgerEntryModelText(entry)`，不能用 `entry.model`。**
+         *
+         * 模型列**显示**的是 `provider/model`（如 `codearts/deepseek-v4.1-flash`），
+         * 而 `entry.model` 只有后半截。只匹配 `entry.model` ⇒ 用户照着屏幕敲
+         * `codearts/` 或 `codearts/deepseek` 会得到 0 条。
+         * 这与账号那条是**同一个缺陷形态**：搜索索引必须覆盖「屏幕上能看到的文本」。
+         */
+        const model = ledgerEntryModelText(entry).toLowerCase();
+        const accountId = String(entry.accountId ?? '').toLowerCase();
+        const accountName = String(accountLabel(entry.accountId, accountNames)).toLowerCase();
+        if (!model.includes(query) && !accountId.includes(query) && !accountName.includes(query)) return false;
+      }
       return true;
     });
     const tokenValue = totalTokensOf;
@@ -3252,7 +3282,7 @@ function TokenLedgerPanel({ rpcCall, onClose, chrome = 'modal' }) {
       return b.ts - a.ts;
     });
     return filtered;
-  }, [entries, entryChannel, entryQuery, entrySort, entryStatus]);
+  }, [entries, entryChannel, entryQuery, entrySort, entryStatus, accountNames]);
   React.useEffect(() => { setEntryPage(1); }, [entryChannel, entryQuery, entrySort, entryStatus]);
   const entryPageCount = Math.max(1, Math.ceil(visibleEntries.length / 50));
   const safeEntryPage = Math.min(entryPage, entryPageCount);
@@ -3292,7 +3322,11 @@ function TokenLedgerPanel({ rpcCall, onClose, chrome = 'modal' }) {
       React.createElement('span', { className: 'dim-jh-ledgerEntryCount' }, `${visibleEntries.length} / ${entries.length}`),
       React.createElement('input', {
         className: 'dim-jh-input dim-jh-ledgerSearch', type: 'search', value: entryQuery,
-        placeholder: '筛选模型', 'aria-label': '按模型筛选请求',
+        // ⚠️ 文案要如实说「两个都能筛」：只说「筛选模型」时用户不会去试账号名
+        // （用户 2026-11-12 要求把这里做成「模型或帐号」）。
+        placeholder: '筛选模型 / 帐号',
+        'aria-label': '按模型或账号筛选请求',
+        title: '匹配模型名（含 provider 前缀）、账号显示名与账号 id；不区分大小写',
         onChange: (event) => setEntryQuery(event.target.value),
       }),
       React.createElement('select', {
