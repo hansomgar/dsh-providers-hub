@@ -73,16 +73,52 @@ git push fork master
 foreach ($b in @('feat/rotation-start','feat/ledger-account-name','feat/codearts-account-name','feat/sidebar-ledger-tab')) {
   git checkout $b
   git rebase origin/master
-  # 若有冲突：按第四节处理，然后 git rebase --continue
+  # 撞上冲突时：停在这里，跑下面那个自动解冲突脚本，它会一直解到 rebase 结束
+  #   node ..\rebase-autoresolve.mjs .
   git push --force-with-lease fork $b      # PR 自动更新，不需要重开
 }
 
 # ── 步骤 3：汇总分支最后走
 git checkout integration/desktop
 git rebase origin/master
-# 若有冲突：按第四节处理
+# 撞上冲突时：同上
+#   node ..\rebase-autoresolve.mjs .
 git push --force-with-lease fork integration/desktop
 ```
+
+### 万一 PR 全被上游拒了 —— 这才是本 fork 的常态操作
+
+上游拒了不等于要放弃改动。**你的功能在 `integration/desktop` 上，它不依赖上游合并。**
+上游发新版本时你要的只是：**把 23 个提交重放到新上游之上**。一条命令：
+
+```powershell
+cd E:\Data\data_dsh\2026\dsh-agent-proxy\dsh-providers-hub
+git tag archive/before-sync-$(Get-Date -Format yyyyMMdd-HHmm) integration/desktop   # 回滚点
+git fetch origin
+git checkout integration/desktop
+git rebase origin/master
+node ..\rebase-autoresolve.mjs .            # ← 冲突全自动解（两边都保留）
+# 验证（必须跑，解冲突没验证等于没解）
+pnpm run build:all
+npx vitest run
+git push --force-with-lease fork integration/desktop
+```
+
+`..\rebase-autoresolve.mjs` **放在仓库上级目录、刻意不入库** —— 本仓库 `.gitignore`
+用 `scripts/*` 只白名单放行构建脚本，这类 fork 专属排障工具按约定留在本地。
+
+它做的事：本项目与上游的冲突有**固定形态**
+（双方在同一位置各加一块、互不依赖）⇒ 答案固定「两边都保留」。脚本把这条固化，
+并且**合并 `TokenLedgerPanel` 的参数表**（上游加参数而我的签名没接住时，
+上游新功能会**静默失效**）。它**不替你取舍**：解不干净就停下报错。
+
+⚠️ **2026-11-12 实测过**（模拟了一个狠得多的上游：连 `TokenLedgerPanel` 的签名和
+导出都撞车）：A 轨 2 提交、B 轨 23 提交全部 rebase 成功，签名自动合并成
+`{ rpcCall, onClose, initialTab = 'summary', chrome = 'modal' }`，
+两边功能全在，**全量 13031 条绿**。
+
+⚠️ **push 到远端只在你想留备份/让 PR 更新时才需要**。上游拒了 PR，你也可以一直只在本地
+rebase、不 push —— 本机跑的就是 working tree。
 
 ### 为什么用 rebase 而不是 merge
 
