@@ -197,7 +197,83 @@ docs/agent-notes/providers-qwenwork-intl.md   完整实测记录
 | `system` | 放**顶层** | OpenAI 兼容上游只从 `messages[]` 读系统提示词，顶层被**静默忽略** ⇒ 插件里配的系统提示词**完全没生效**而界面一切正常 | `foldSystemIntoMessages` 折进 `messages[0]` |
 | `max_tokens` | 写 `max_completion_tokens` | 上游不认 | 用 `max_tokens`，且只放行**安全正整数**（0/负数/NaN 会让 DSH 抛 `INVALID_MODEL_MAX_TOKENS` 把整轮搞崩） |
 
-### 4.3 ⚠️ 两段式推理（与所有别家不同）
+### 4.3 ⚠️ 设备码登录（Device Code + PKCE）—— 协议是重新逆向的
+
+**用户操作**：面板点「+ 新建账号」→ 弹出授权网址 → 浏览器打开 → 登录
+qwenwork.ai → 确认授权 → 插件后台轮询自动拿到 token。
+
+```
+① GET {gateway}/device/selectAccounts
+     ?challenge=<S256(verifier)>&challenge_method=S256
+     &nonce=<uuid>&machine_id=<uuid>
+     &client_id=<国际站>&redirect_uri=qwenwork%3A%2F%2F
+   → 302 Location: qwenwork.ai/oauth2/auth?...&state=<服务端生成>
+
+② GET {gateway}/api/v1/deviceToken/poll
+     ?nonce=<uuid>&verifier=<b64url>&challenge_method=S256
+   → 404 {}   还没授权
+   → 200      { token, refresh_token, expires_at, user_id, user_name }
+```
+
+#### ⚠️⚠️ 三个反直觉点（每一个都实测踩过）
+
+**① `selectAccounts` 成功是 302，不返回 nonce。**
+
+`nonce` 是**客户端自己 `randomUUID()` 生成**的。按「请求 nonce」的思路实现，
+无论怎么调都拿不到 —— 因为方向就是错的。
+
+**② `poll` 的 `404 {}` 对「未授权」和「nonce 不存在」返回完全相同。**
+
+逐字节比对过（`indistinguishable: true`）⇒ **不能靠 404 判断 flow 是否还有效**，
+只能自己设总超时（当前 15 分钟）。
+
+**③ 两边 query 字段集合严格互斥，多一个就 400。**
+
+| 端点 | 允许的字段（**恰好这些**） |
+|---|---|
+| `selectAccounts` | `challenge` / `challenge_method` / `nonce` / `machine_id` / `client_id` / `redirect_uri` |
+| `poll` | `nonce` / `verifier` / `challenge_method` |
+
+⚠️ `challenge` 属于前者、`verifier` 属于后者。把 `challenge` 传给 `poll` 会得到
+`field:"challenge", reason:"not_allowed"` —— 极易误判成「缺字段」。
+
+⚠️ `field:"query", reason:"not_allowed"` 是**针对整条 query 的通用报错**，
+`valueSummary.length` 是整条串的字节长度，**指不出具体哪个字段错**。
+
+#### 其它实测约束
+
+| 探测 | 结果 |
+|---|---|
+| 六字段齐全 | **302** ✅ |
+| **完全不发任何 header** | **302** ✅（headers 非必需） |
+| `POST` 到任一端点 | **404**（只接受 GET） |
+| `nonce="abc123"`（非 UUID） | 400 |
+| `machine_id="not-a-uuid"` | **302**（不做格式校验） |
+| `challenge_method=plain` | 400 |
+| 同一 nonce 重复用 | **409 `DEVICE_FLOW_REPLAYED`** |
+| 多传 `code=abc` / `response_type` / `scope` / `cosyVersion` | 400 |
+| 国内站 `client_id` / `redirect_uri` | 400 |
+
+⚠️ `cosyVersion`（1.1.71）**完全不参与登录**，只用于聊天请求的 COSY 信封。
+
+#### 代码位置
+
+```
+src/qwenwork-login.ts   createQwenworkDeviceFlow / qwenworkSelectAccountsUrl
+                        pollQwenworkDeviceToken / waitForQwenworkCredential
+                        startQwenworkDeviceLogin（凭据由自己落盘，与 codely 同款）
+src/qwenwork.ts         qwenworkDeviceAuthUrl（唯一一份拼串实现）
+src/jet-hub-rpc.ts      account.create 的 qwenworkintl 分支
+tests/unit/qwenwork-login.spec.ts   29 条（逐条锁死上面三个坑）
+```
+
+⚠️ **「连续 3 次 broken 才判死」是刻意的**：单次 HTTP 400 可能是瞬时抖动，
+一次就判死会把抖动误报成「登录失败」。
+
+⚠️ **200 但响应里没有 `token` 必须判 broken**：当成功会写进一张空凭据卡，
+用户看到「已登录」却发消息 401。
+
+### 4.4 ⚠️ 两段式推理（与所有别家不同）
 
 ```
 ① 设备码登录    POST gateway.qwenwork.ai/device/selectAccounts
@@ -219,7 +295,7 @@ docs/agent-notes/providers-qwenwork-intl.md   完整实测记录
 主回复 + 标题 + 压缩三条请求 ⇒ 没有单飞表就会换三次票。
 实现在 `QwenworkIntlAuth.mintTicket`（按 slot id 缓存 + inflight Map，**提前 60 秒**失效）。
 
-### 4.4 ⚠️⚠️ 三个额度池，只有 daily 会被消耗
+### 4.5 ⚠️⚠️ 三个额度池，只有 daily 会被消耗
 
 ```json
 GET https://qwenwork.ai/user/wallets
@@ -236,12 +312,12 @@ GET https://qwenwork.ai/user/wallets
 2. 折算可用性**只看 daily** —— 用合计会漏判（daily 已空但合计还有 500 ⇒
    账号实际不可用却仍被排进聚合候选 ⇒ **每轮先 429 一次**）。
 
-### 4.5 ⚠️ 鉴权是 Bearer，**cookie 一律 401**
+### 4.6 ⚠️ 鉴权是 Bearer，**cookie 一律 401**
 
 网页版确实用 `token` cookie，但 API **不认** cookie。
 实测 4 种 cookie 组合**全部 401**；同一 token 走 `Authorization: Bearer` 立刻 200。
 
-### 4.6 ⚠️ 国际站专属 OAuth 参数（与国内站**不同**，混用即 400）
+### 4.7 ⚠️ 国际站专属 OAuth 参数（与国内站**不同**，混用即 400）
 
 | 字段 | 国内站 `qwenwork.cn` | **国际站 `qwenwork.ai`** |
 |---|---|---|
@@ -250,7 +326,7 @@ GET https://qwenwork.ai/user/wallets
 
 实测混用 ⇒ `400 INVALID_DEVICE_FLOW`。**必须成对正确**。
 
-### 4.7 ⚠️ 本仓通用硬约束（踩过的）
+### 4.8 ⚠️ 本仓通用硬约束（踩过的）
 
 | 纪律 | 后果 |
 |---|---|
