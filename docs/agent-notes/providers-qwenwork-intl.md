@@ -317,7 +317,11 @@ block-start(index, blockType:'tool-call')
   「★★ 每个 provider id 的续期都分派到**自己**的 auth 实例」——
   真跑 `account.refresh`，错接即红。
 
-### 11.2 三个可复跑的验证脚本（都在 `scripts/`）
+### 11.2 三个可复跑的验证脚本（**刻意不入库**）
+
+⚠️ 它们放在仓库**外部**（`.gitignore` 的 `scripts/*` 会把新增文件挡掉，
+而按本仓约定「只读排查与研究工具仅本地保留」，故**不提交**）。
+开发期实测用的路径：`C:\Users\HSG\ego\qwenwork-verify\`
 
 | 脚本 | 用途 | 需要凭据 |
 |---|---|---|
@@ -325,7 +329,8 @@ block-start(index, blockType:'tool-call')
 | `verify-qwenwork-tools.mjs` | 逐帧打印工具调用三段，确认 `block-end` 里有完整调用 | ✅ `QW_TOKEN` |
 | `verify-qwenwork-wiring.mjs` | **不需要凭据**：只验模块能否 import + 三张接线表 | ❌ |
 
-⚠️ `QW_TOKEN` 是 `qwenwork.ai` 的登录 access token（从网页 `token` cookie 或
+⚠️ 若要复跑，把脚本放回 `dsh-providers-hub/scripts/`（它不会被提交）。
+`QW_TOKEN` 是 `qwenwork.ai` 的登录 access token（从网页 `token` cookie 或
 `/user/wallets` 请求的 `Authorization` 头里取）。
 **实测有效期 15 天**，过期后重新取一个即可。
 
