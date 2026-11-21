@@ -225,6 +225,8 @@ import { maskModelscopeKey } from './modelscope.js'
 // ⚠️ **本 fork 独有**（qiniu，2026-10-29）。
 import { QINIU } from './qiniu-product.js'
 import { QWENWORK_INTL } from './qwenwork-product.js'
+import { startQwenworkDeviceLogin } from './qwenwork-login.js'
+import { qwenworkCredentialExpiresAtMs } from './qwenwork.js'
 import { maskQiniuKey } from './qiniu.js'
 // ⚠️ **本 fork 独有**（monkeycode，2026-11-02）：`maskMonkeycodeKey` 在宿主侧
 //    打码（不下发明文）；`inferMonkeycodeChannel` 让卡片显示「白泽 / 网关」，
@@ -8086,6 +8088,67 @@ function registerJetHubEndpoints(
           }).catch((error: unknown) => {
             ctx.logger.warn(`[jet-hub] background codely login failed for ${id}: ${String(error)}`)
             // 登录失败：记终态原因（供 login.poll 报给前端）+ 移除占位条目，不留幽灵账号
+            void failLogin(id, error)
+          })
+          return { ok: true, value: { accountId: id, loginUrl: started.loginUrl } }
+        } else if (provider === QWENWORK_INTL.id) {
+          /**
+           * 千问办公国际站（`qwenworkintl`，2026-11-22，**本 fork 独有**）。
+           *
+           * ⚠️ 是**设备码 + PKCE** 登录（与 codely 同型）：
+           * ① 客户端生成非对称随机量（verifier/challenge/nonce/machine_id）；
+           * ② 本分支返回 `loginUrl`，用户在浏览器打开并授权；
+           * ③ 后台 `poll` 轮询，授权一落地立刻拿到 token 并**自行落盘**。
+           *
+           * ⚠️⚠️ **协议有三处反直觉**（全部真机实测，详见 `qwenwork-login.ts` 模块头）：
+           * - `selectAccounts` 成功是 **302**，不返回 nonce（nonce 是客户端生成的）；
+           * - `poll` 的 `404 {}` 对「未授权」和「nonce 不存在」**返回完全相同**
+           *   ⇒ 只能靠总超时兜底；
+           * - 两边的 query 字段集合**严格互斥**，多传一个就 400。
+           *
+           * ⚠️ 凭据由 `startQwenworkDeviceLogin` **自己落盘**（与 codely 同款），
+           *    故这里只更新账号卡片字段。
+           */
+          const started = await (async () => {
+            try {
+              return await startQwenworkDeviceLogin({
+                ref: credentialRef(refName),
+                credentials: ctx.credentials,
+                product: QWENWORK_INTL,
+              })
+            } catch (error) {
+              // 生成流程本身几乎不会失败（纯本地随机数），故这条包装主要是
+              // 兜住「`AbortSignal.any` 等运行时不支持」这类环境异常。
+              const reason = error instanceof Error ? error.message : String(error)
+              throw new Error(`无法启动千问办公国际站登录：${reason}`)
+            }
+          })()
+          // 先登记启用的占位条目（无凭据），使前端 login.poll 能立即看到该账号。
+          await pool.addAccount({
+            id,
+            provider: QWENWORK_INTL.id,
+            nickname: id,
+            enabled: true,
+            credentialRef: refName,
+            // ⚠️ `refreshable` 为 true：本家**真有** refresh 端点
+            //（`POST /api/v1/deviceToken/refresh`，body 必须带 `target`），
+            // 且 `JetHubAuths.qwenworkintl` 已挂上 ⇒ 续期按钮可用。
+            refreshable: true,
+            createdAt: Date.now(),
+          })
+          started.result.then(async (credential) => {
+            const expiresAt = qwenworkCredentialExpiresAtMs(credential)
+            await pool.updateAccount(id, {
+              nickname: credential.nickname !== undefined && credential.nickname.length > 0
+                ? credential.nickname
+                : credential.email !== undefined && credential.email.length > 0
+                  ? credential.email
+                  : id,
+              // ⚠️ 缺省时**不写**（卡片如实显示「未知」，不编造）。
+              ...expiresAt === undefined ? {} : { expiresAt },
+            })
+          }).catch((error: unknown) => {
+            ctx.logger.warn(`[jet-hub] background qwenworkintl login failed for ${id}: ${String(error)}`)
             void failLogin(id, error)
           })
           return { ok: true, value: { accountId: id, loginUrl: started.loginUrl } }

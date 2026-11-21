@@ -67,15 +67,31 @@ describe('产品配置', () => {
     expect(QWENWORK_INTL.redirectScheme).not.toBe('qwenwork-cn://')
   })
 
-  it('设备授权 URL 带上 clientId / redirect / PKCE', () => {
-    const url = qwenworkDeviceAuthUrl('chal-1', 'mid-1')
+   * ⚠️ **六个 query 字段一个不能多、一个不能少**（2026-11-22 实测）：
+   * 任缺一个 ⇒ 400；任多一个（`response_type` / `scope` / `cosyVersion`）⇒ 同样 400。
+   * 而那个报错是针对**整条 query** 的通用判据，指不出具体哪个字段错
+   * ⇒ 只能靠「集合恰好相等」锁死。完整约束与推导见 `qwenwork-login.spec.ts`。
+   */
+   it('★ 设备授权 URL：字段恰好六个，且 clientId / redirect 是国际站专属值', () => {
+    const url = qwenworkDeviceAuthUrl({
+      challenge: 'chal-1',
+      nonce: 'n-1',
+      machineId: 'mid-1',
+    })
     expect(url.startsWith(`${QWENWORK_INTL.gatewayBase}${QWENWORK_INTL.deviceAuthPath}?`)).toBe(true)
     const parsed = new URL(url)
+    expect([...parsed.searchParams.keys()].sort()).toEqual([
+      'challenge', 'challenge_method', 'client_id', 'machine_id', 'nonce', 'redirect_uri',
+    ])
     expect(parsed.searchParams.get('client_id')).toBe(QWENWORK_INTL.clientId)
     expect(parsed.searchParams.get('redirect_uri')).toBe(QWENWORK_INTL.redirectScheme)
     expect(parsed.searchParams.get('challenge')).toBe('chal-1')
     expect(parsed.searchParams.get('challenge_method')).toBe('S256')
     expect(parsed.searchParams.get('machine_id')).toBe('mid-1')
+    // ⚠️ 反向：这些多余的字段每一个都会让上游 400。
+    for (const forbidden of ['response_type', 'scope', 'cosyVersion', 'state']) {
+      expect(parsed.searchParams.has(forbidden), `${forbidden} 会让上游 400`).toBe(false)
+    }
   })
 
   it('模型表恰好 9 条，且都是实测 200 的 id', () => {

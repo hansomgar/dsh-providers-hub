@@ -82,6 +82,13 @@ export interface QwenworkCredential {
   nickname?: string
   /** 邮箱（卡片上用于区分同名账号）。 */
   email?: string
+  /**
+   * 机器 id（设备码登录时生成，**聊天请求的 COSY 签名要用**）。
+   *
+   * ⚠️ 首次登录生成后必须持久化：换一个值等于换一台机器，
+   * 上游可能会把同一账号当成两个设备（且签名与它绑定）。
+   */
+  machine_id?: string
 }
 
 /**
@@ -229,33 +236,53 @@ export function qwenworkDeviceRefreshUrl(product: QwenworkProduct = QWENWORK_INT
   return `${product.gatewayBase}${product.deviceRefreshPath}`
 }
 
+/** 设备码**发起**全 URL（网关域）。⚠️ 见 `qwenworkDeviceAuthUrl` 的字段约束。 */
+export function qwenworkDeviceSelectUrl(product: QwenworkProduct = QWENWORK_INTL): string {
+  return `${product.gatewayBase}${product.deviceAuthPath}`
+}
+
 /**
- * 设备码授权页 URL。
+ * 设备码**发起** URL（`GET /device/selectAccounts`）。
  *
- * 参数与国内站同形（PKCE S256），但 **`client_id` 与 `redirect_uri` 是国际站专属**
- * —— 混用国内站的值实测回 `400 INVALID_DEVICE_FLOW`，且两个字段必须**成对**正确。
+ * ## ⚠️⚠️ 六个 query 字段**一个不能少、一个不能多**（2026-11-22 实测）
  *
- * @param challenge           PKCE code challenge（S256）。
- * @param machineId           机器标识（上游只要求非空）。
- * @param product             产品配置。
- * @param state               可选 state（原样回传）。
+ * | 字段 | 说明 |
+ * |---|---|
+ * | `challenge` | PKCE S256 = `base64url(sha256(verifier))`，**定长格式有校验** |
+ * | `challenge_method` | 只接受 `S256`（`plain` ⇒ 400） |
+ * | `nonce` | **必须是 UUID 字符串**（裸随机串 ⇒ 400）；每次登录重新生成 |
+ * | `machine_id` | 机器 id，**不做格式校验**（`not-a-uuid` 也 302） |
+ * | `client_id` | 国际站专属值，国内站的值 ⇒ 400 |
+ * | `redirect_uri` | 国际站 `qwenwork://`，国内站 `qwenwork-cn://` ⇒ 400 |
+ *
+ * ⚠️ **不要加 `response_type` / `scope` / `cosyVersion`** —— 任一多余字段都会
+ * 得到 `400 INVALID_DEVICE_FLOW` + `field:"query", reason:"not_allowed"`
+ * （那个报错是针对**整条 query** 的通用判据，指不出具体哪个字段错）。
+ *
+ * ⚠️ **成功信号是 302**（跳到 `qwenwork.ai/oauth2/auth`），不是 200 JSON。
+ * 本函数只拼串、**不发请求** —— 由用户在浏览器打开。
+ *
+ * @param flow PKCE 三件套 + nonce + machine_id（见 `createQwenworkDeviceFlow`）。
+ * @param product 产品配置。
  */
 export function qwenworkDeviceAuthUrl(
-  challenge: string,
-  machineId: string,
+  flow: {
+    readonly challenge: string
+    readonly challengeMethod?: string
+    readonly nonce: string
+    readonly machineId: string
+  },
   product: QwenworkProduct = QWENWORK_INTL,
-  state?: string,
 ): string {
   const params = new URLSearchParams({
-    challenge,
-    challenge_method: 'S256',
+    challenge: flow.challenge,
+    challenge_method: flow.challengeMethod ?? 'S256',
+    nonce: flow.nonce,
+    machine_id: flow.machineId,
     client_id: product.clientId,
-    machine_id: machineId,
     redirect_uri: product.redirectScheme,
-    response_type: 'code',
   })
-  if (state !== undefined && state.length > 0) params.set('state', state)
-  return `${product.gatewayBase}${product.deviceAuthPath}?${params.toString()}`
+  return `${qwenworkDeviceSelectUrl(product)}?${params.toString()}`
 }
 
 /**
