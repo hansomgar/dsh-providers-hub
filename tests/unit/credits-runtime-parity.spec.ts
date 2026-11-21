@@ -681,6 +681,13 @@ const BALANCE_PATH_OF: Readonly<Record<string, string>> = {
   //    两站是**同一路径、不同 host**（`*.agnes-ai.cn` / `*.agnes-ai.com`）⇒ 单列两条。
   agnescode: '/api/v2/subscription/credits-balance',
   agnescodeintl: '/api/v2/subscription/credits-balance',
+  // ⚠️ 千问办公国际站（2026-11-22，本 fork 独有）：余额走**网页域**
+  //    `https://qwenwork.ai/user/wallets` —— 注意它**不在** `gateway.qwenwork.ai`
+  //    那个网关域下（那个域只有 `/api/v1/adapter/*`，且**没有** wallets 路由，
+  //    实测 404）。
+  //    ⚠️ 推理是 `POST {base_url}/v1/chat/completions`（`base_url` 由换票下发），
+  //    与余额完全不同源 ⇒ 这条清单守的正是「余额请求打到自己端点」。
+  qwenworkintl: '/user/wallets',
 }
 
 /**
@@ -902,8 +909,12 @@ describe('★★ 生产积分表的内容（源码文本断言的行为替代）
     //    ⚠️ 2026-11-19 并入 agnescode + agnescodeintl（AgnesCode 两站，
     //    `credits.balance: true`、不在特例表）⇒ 25 → 27。余额走账号级
     //    `{apiRoot}/api/v2/subscription/credits-balance`（**不在 `/v1` 下**、
+
     //    信封 `code` 是字符串 `"000000"`），两站同一路径、不同 host。
-    expect(expected.length).toBe(27)
+    //    ⚠️ 2026-11-22 并入 qwenworkintl（千问办公国际站，`credits.balance: true`、
+    //    不在特例表）⇒ 27 → 28。余额走网页域 `/user/wallets`。
+
+    expect(expected.length).toBe(28)
     // ⚠️ **关键集合判据必须对「生产真正调用的那种形态」也成立**（2026-10-08 复审 C1）：
     //    上面那次是 `createProviderCredits()`（无 deps），而端点与 `index.ts` 调的
     //    都是 `createProviderCredits({ loomy, raccoon, zcode })`。deps 只应影响**实现**，

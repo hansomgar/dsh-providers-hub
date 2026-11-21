@@ -122,7 +122,8 @@ describe('account.refresh 分派（T7 回归）', () => {
     // 2026-11-02 fork: monkeycodeintl + baizhi (channel:true) -> 25 -> 27.
     // 2026-11-09 fork: marvis (channel:true) -> 27 -> 28.
     // 2026-11-19 fork: agnescode + agnescodeintl（AgnesCode 两站）-> 28 -> 30。
-    ).toHaveLength(30)
+      // 2026-11-22 fork: qwenworkintl（千问办公国际站）-> 30 -> 31。
+    ).toHaveLength(31)
   })
 
   it('buddy 账号刷新**自己的** credentialRef，而不是默认单凭据 ref', async () => {

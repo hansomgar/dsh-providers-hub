@@ -917,6 +917,49 @@ export const PROVIDER_REGISTRY: readonly ProviderDescriptor[] = Object.freeze([
     channel: true,
   },
   {
+    id: 'qwenworkintl',
+    label: 'QwenWork Intl (千问办公国际版)',
+    displayName: 'QwenWork Intl (千问办公国际版)',
+    logoClass: 'qwenworkintl',
+    // ⚠️⚠️ **`balance: true` 是实测结论（2026-11-22 真机）**，与 qiniu 相反。
+    //
+    // 国际站有**可读的额度端点**（`GET https://qwenwork.ai/user/wallets`，
+    // `Authorization: Bearer <token>`）：
+    //
+    // ```json
+    // { "daily_credits":    { "total_balance": 200 },   ← 推理**只扣**这个
+    //   "monthly_credits":  { "total_balance": 0 },
+    //   "longterm_credits": { "total_balance": 500 } }  ← 注册赠送，推理**不扣**
+    // ```
+    //
+    // ⚠️⚠️ **三个池必须分开呈现**（`src/qwenwork-credits.ts` 的模块头详述）：
+    // `quota.remaining` 是**合计 700**，而推理只扣 daily。把 700 当「每天可用」
+    // 会让用户在 200 烧完后收到 `balance_insufficient` 却看到「还有 500」；
+    // 用合计判耗尽会**漏判**（daily 已空但合计还有 500 ⇒ 实际已不可用）。
+    // ⇒ `buildQwenworkBalance` 的 `total` 取 **daily**，longterm 单独成一个包。
+    //
+    // ⚠️⚠️ **`dailyCheckin: false` 同样是实测结论，不是漏接线。**
+    // 逐个探测 16 个候选领取端点**全部 404**；国内站那套营销活动端点
+    // （`/api/marketing/benefits/claim`、`/api/marketing/eligibility/ensure`）
+    // 在国际站**也是 404**（国内站是 401 = 存在）。
+    // ⇒ 国际站的额度是**服务端每日自动发放**的，没有任何「领取」动作可调。
+    //
+    // ⚠️ 这与国内站形成鲜明对比：国内站的 500/月要靠「伪造 session/turn 上报」
+    // 去领（官方活动页明禁「异常方式套取积分」）。本 provider **刻意不实现那套**
+    // —— 国际站不需要，且那条路有封号风险。
+    //
+    // ⚠️ 连带影响（照 qiniu 那段的同款清单处理，别只改这里）：
+    //   - **进** `aggregate-expiry.ts` 的 `WIRED_EXPIRY_PROVIDERS`（有余额 ⇒ 有临期档）；
+    //   - **进** `credits-balance-self-heal.spec.ts` 的正向派生判据（按
+    //     `credits.balance === true` 过滤）；
+    //   - **不进** `SELF_HEAL_EXEMPT`（本家**有** refresh 端点，能自愈）。
+    credits: { balance: true, dailyCheckin: false },
+    // ⚠️ **rateLimit 省略（= true）**：适配器**确实会写** modelRateLimits
+    //   （`qwenworkRetryAfterMs`：429 走指数退避、`balance_insufficient` 归额度）。
+    //   接线层注入了 `markLimited` ⇒「重测 / 重置」两个按钮都该保留。
+    channel: true,
+  },
+  {
     id: 'codely',
     label: 'Codely (Unity)',
     displayName: 'Codely (Unity)',

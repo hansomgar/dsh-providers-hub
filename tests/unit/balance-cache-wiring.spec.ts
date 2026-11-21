@@ -229,6 +229,10 @@ describe('★★ 接线的**透传**腿（`provider-expiry.ts` 的 `context.cach
     //    ⚠️ 两站各一项：账池不互通、域名族不同；漏了它本表就漏测那两家的透传。
     'agnescode',
     'agnescodeintl',
+    // ⚠️ 千问办公国际站（2026-11-22）：`qwenworkExpiry` 同样收 `context.cachedBalance`
+    //    （折算原语在 `qwenwork-credits.ts`，`provider-expiry.ts` 的条目已透传）。
+    //    漏登记 ⇒ 本表与生产漂移（本用例即清单，多一个少一个都红）。
+    'qwenworkintl',
   ] as const
 
   it('★★ 所有接了 `cachedBalance` 透传的渠道都必须真的透传（本表即清单）', async () => {

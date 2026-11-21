@@ -343,6 +343,22 @@ export const WIRED_EXPIRY_PROVIDERS: readonly string[] = Object.freeze([
   //    折算原语：`provider-expiry.ts` 的 `magicrewintl` 条目 → 同一个 `magicrewExpiry`，
   //    但**必须传 `MAGICREW_INTL`**（传国内版会拿国内基址查国际账号余额）。
   'magicrewintl',
+  // ⚠️ **千问办公国际站**（`qwenworkintl`，2026-11-22）—— **决定聚合候选表
+  //    可见性的就是本表**。只加 `AGGREGATE_CHANNELS` 而不加这里 ⇒ 折算恒
+  //    UNUSABLE ⇒ 国际站候选从轮换表里静默消失（与 minimaxintl / magicrewintl
+  //    同款陷阱，这是第 N 次复发）。
+  //
+  //    折算原语见 `provider-expiry.ts` 的 `qwenworkintl` 条目 →
+  //    `qwenwork-credits.ts` 的 `buildQwenworkPackages`。
+  //
+  //    ⚠️⚠️ **本家的到期语义与别家不同，别照抄 buddy 那套**：
+  //    实时测的两个钱包**都带** `valid_to`（每日池「次日 00:00」、注册赠送
+  //    「3 个月后」）⇒ 到期时刻**是已知的**，正常折算即可。
+  //    但 ⚠️ **只有 `daily_credits` 会被推理消耗**，注册赠送那 500
+  //    **扣不动**（实测推理前后 longterm 纹丝不动）⇒ 折算层**必须**只按
+  //    daily 判可用性，否则会在 daily 烧光后仍把账号当「有余额可用」
+  //    （用户会看到一个必然 429 的候选）。
+  'qwenworkintl',
 ])
 
 /**

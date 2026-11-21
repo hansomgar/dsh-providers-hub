@@ -704,6 +704,8 @@ describe('SELF_HEAL_REFRESHABLE_PROVIDERS 与真实分派的一致性', () => {
     //    不同形的那几家（MINIMAX_INTL / AUTOCLAW_INTL / CODERLY）正是这条
     //    纪律存在的理由。
     MARVIS: 'marvis',
+  // ⚠️ 千问办公国际站（2026-11-22）：常量名带下划线，与 id 不同形（同 MINIMAX_INTL）。
+  QWENWORK_INTL: 'qwenworkintl',
   }
 
   /**
@@ -786,8 +788,10 @@ describe('SELF_HEAL_REFRESHABLE_PROVIDERS 与真实分派的一致性', () => {
       'LOBSTERAI',
       // ⚠️ 2026-11-09 加 marvis（腾讯 Marvis）：有真实 refresh 端点。
       'MARVIS',
-      'MINIMAX', 'MINIMAX_INTL', 'OFFICEACE', 'QODER', 'QODER_CN', 'RACCOON',
-      'TRAE',
+      'MINIMAX', 'MINIMAX_INTL', 'OFFICEACE', 'QODER', 'QODER_CN',
+      // ⚠️ 2026-11-22 加 qwenworkintl（千问办公国际站）：有真实 refresh 端点。
+      'QWENWORK_INTL',
+      'RACCOON', 'TRAE',
     ])
   })
 
@@ -797,7 +801,7 @@ describe('SELF_HEAL_REFRESHABLE_PROVIDERS 与真实分派的一致性', () => {
     expect([...inSet].sort()).toEqual([
       'accio', 'astudio', 'autoclaw', 'autoclawintl', 'buddy', 'cline', 'codearts', 'codely',
       'gemini', 'lobsterai', 'magicrew', 'magicrewintl', 'marvis', 'minimax', 'minimaxintl', 'officeace',
-      'qoder', 'qodercn', 'raccoon', 'trae', 'workbuddy',
+      'qoder', 'qodercn', 'qwenworkintl', 'raccoon', 'trae', 'workbuddy',
     ])
     // 反向：两家没有 refresh 端点，必须**静默跳过**而非尝试续期。
     expect(inSet.has('loomy')).toBe(false)

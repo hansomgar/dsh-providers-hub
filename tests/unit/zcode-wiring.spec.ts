@@ -422,7 +422,7 @@ describe('ZCode 客户端接入（缺口 3 / 4 / 5）', () => {
     // 2026-11-09 fork: marvis -> 29 -> 30.
     // 2026-11-13 fork: doubao（豆包）-> 30 -> 31.
     // 2026-11-19 fork: agnescode + agnescodeintl -> 31 -> 33.
-    expect(ids).toHaveLength(33)
+    expect(ids).toHaveLength(34)
   })
 
   it('展示名与产品配置一致（避免两处漂移）', () => {
@@ -672,7 +672,7 @@ describe('ZCode RPC 分派（缺口 2：接线）', () => {
     // 2026-11-09 fork: marvis -> 29 -> 30.
     // 2026-11-13 fork: doubao -> 30 -> 31（客户端图标表同步加了一项）。
     // 2026-11-19 fork: agnescode + agnescodeintl -> 31 -> 33（图标表同步加两项）。
-    expect(clientIds.length).toBe(33)
+    expect(clientIds.length).toBe(34)
     // ⚠️ **21 个 auth 键**（23 个客户端 id − opencode − aggregate）。
     //    ⚠️ 2026-10-22（A6）：codely **已接续期**（`CodelyAuth` 签名修正为单参
     //    `refreshAll(pool)`，并接入 `index.ts` 的 `auths`）⇒ 它不再是豁免项。
@@ -683,7 +683,9 @@ describe('ZCode RPC 分派（缺口 2：接线）', () => {
     // 2026-11-09: marvis（`MarvisAuth`）接入后 27 -> 28。
     // 2026-11-13: doubao 是 `channel: false`（无 auth 服务）⇒ 键位仍是 28。
     // 2026-11-19: agnescode + agnescodeintl（`AgnescodeAuth` 两站实例）⇒ 28 -> 30。
-    expect(keys).toHaveLength(30)
+  // 2026-11-22: qwenworkintl（`QwenworkIntlAuth`，千问办公国际站）⇒ 30 -> 31。
+
+    expect(keys).toHaveLength(31)
     const withoutKey = clientIds.filter((id) => !keys.includes(id))
     expect([...withoutKey].sort()).toEqual(['aggregate', 'doubao', 'opencode'])
   })

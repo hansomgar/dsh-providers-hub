@@ -70,6 +70,7 @@ import { AUTOCLAW_INTL } from '../../src/autoclaw-product.js'
 // ⚠️ **本 fork 独有**（modelscope，2026-10-16）。
 import { MagicrewAdapter } from '../../src/magicrew-adapter.js'
 import { MarvisAdapter } from '../../src/marvis-adapter.js'
+import { QwenworkAdapter } from '../../src/qwenwork-adapter.js'
 import { MAGICREW_FALLBACK_CONTEXT_WINDOW, MAGICREW_INTL } from '../../src/magicrew-product.js'
 import { ModelscopeAdapter } from '../../src/modelscope-adapter.js'
 // ⚠️ **本 fork 独有**（MonkeyCode，2026-11-02）。
@@ -721,7 +722,7 @@ id: 'autoclaw',
     // ⚠️ 腾讯 Marvis（2026-11-09）：`channel: true` ⇒ 必须进本表，否则它不过
     //    本段任何对拍（目录 / 模态 / 窗口 / 档位全部零覆盖）。
     //    ⚠️ 上游**没有目录端点**（9 条候选全 404/400）⇒ 目录恒为单条
-    //    `deepseek-v4-pro-external`；本段只对拍跨家契约，所以「只有一条」正是可预期的形状。
+    //    `deepseek-v4-pro-external`；本段只对拍跨家契约，所以「只有一条」正是可预期的形状。    // ⚠️ 千问办公国际站（2026-11-22）：目录恒来自兜底表（远端端点不可用）。
     {
       id: 'marvis',
       make: () => new MarvisAdapter({
@@ -736,6 +737,26 @@ id: 'autoclaw',
             login_type: '1',
           } as never,
         }],
+      } as never),
+    },
+    // ⚠️ 千问办公国际站（2026-11-22，`channel: true`）⇒ 必须进本表，
+    //    否则目录 / 模态 / 窗口 / 档位四项对它零覆盖。
+    //    ⚠️ 本家**没有可用的远端目录端点**（`/algo/api/v2/model/list` 实测 403、
+    //    `/v1/models` 实测 404）⇒ 目录恒来自 `QWENWORK_INTL_FALLBACK_MODELS`
+    //    （9 个模型逐个真机实测 200）。
+    //    ⚠️ `mintTicket` 必须注入：适配器拿不到票据就发不出请求，
+    //    不注入会让本表这条恒抛错（而不是「目录为空」）。
+    {
+      id: 'qwenworkintl',
+      make: () => new QwenworkAdapter({
+        ...NO_CRED,
+        slots: async () => [{ id: 'qwenworkintl', accessToken: 'qw-test-access-token' }],
+        // 单测不发真请求：票据直接伪造（`base_url` 用 product 兜底值）。
+        mintTicket: async () => ({
+          token: 'fake-maas-token',
+          baseUrl: 'https://api1.qwenwork.ai',
+          expiresAtMs: Date.now() + 3_600_000,
+        }),
       } as never),
     },
     // ⚠️ Codely（Unity，2026-10-22 A6）：`channel` 已翻 true ⇒ 必须进本表，
@@ -961,7 +982,9 @@ id: 'autoclaw',
     // ⚠️ 2026-11-02 并入 baizhi（百智云，`channel: true`）⇒ 27 → 28。
     // ⚠️ 2026-11-09 加 marvis（腾讯 Marvis，`channel: true`）⇒ 28 → 29。
     // ⚠️ 2026-11-19 加 agnescode + agnescodeintl（AgnesCode 两站）⇒ 29 → 31。
-    expect(CASES).toHaveLength(31)
+  // ⚠️ 2026-11-22 加 qwenworkintl（千问办公国际站，`channel: true`）⇒ 31 → 32。
+
+    expect(CASES).toHaveLength(32)
   })
 
   it('★★ `catalog` 具备 `refresh` 的家，适配器上必须**存在** `refresh` 成员（转发接线）', () => {

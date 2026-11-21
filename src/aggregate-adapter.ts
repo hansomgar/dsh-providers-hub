@@ -1471,6 +1471,14 @@ export class AggregateAdapter extends LlmAdapter {
     //    （折算原语 `marvisExpiry`，属「有余额但不下发到期时间」那一类：
     //    有余额即 `NEVER`、烧光即 `UNUSABLE`）。
     'marvis',
+    // ⚠️ 千问办公国际站（`qwenworkintl`，2026-11-22）：`channel: true` ⇒ 必须进本清单，
+    //    否则它的 9 个模型**永不进聚合目录、静默不可见**。
+    //    ⚠️⚠️ **本数组只是第一道门**（模型层归并）。决定「在不在候选表里」的是
+    //    `aggregate-expiry.ts` 的 `WIRED_EXPIRY_PROVIDERS` —— 已同步登记
+    //    （折算原语 `qwenworkExpiry`）。
+    //    ⚠️ 本家的折算判据与别家**不同**：只看 `daily_credits`（推理只扣这个池，
+    //    注册赠送的 500 扣不动）⇒ 详见 `qwenwork-credits.ts` 的模块头。
+    'qwenworkintl',
   ])
 
   /**

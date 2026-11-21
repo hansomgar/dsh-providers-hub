@@ -10819,6 +10819,7 @@ const AGG_WIRED_CHANNEL_IDS = [
   'magicrew', 'magicrewintl',
   'monkeycode', 'monkeycodeintl', 'baizhi', 'marvis',
   'agnescode', 'agnescodeintl',
+  'qwenworkintl',
 ];
 
 /**

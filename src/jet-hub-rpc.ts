@@ -169,6 +169,7 @@ import { parseAutoclawCredential, isAutoclawRefreshable, autoclawDisplayNickname
 import type { ModelscopeAuth } from './modelscope-auth.js'
 // ⚠️ **本 fork 独有**（qiniu，2026-10-29）。
 import type { QiniuAuth } from './qiniu-auth.js'
+import type { QwenworkIntlAuth } from './qwenwork-auth.js'
 // ⚠️ **本 fork 独有**（monkeycode，2026-11-02）：第二家吃「粘贴 Key」的渠道
 //    （主路径是浏览器登录，手工 Key 只是备用，见 `src/monkeycode-auth.ts`）。
 import type { MonkeycodeAuth } from './monkeycode-auth.js'
@@ -223,6 +224,7 @@ import { MODELSCOPE } from './modelscope-product.js'
 import { maskModelscopeKey } from './modelscope.js'
 // ⚠️ **本 fork 独有**（qiniu，2026-10-29）。
 import { QINIU } from './qiniu-product.js'
+import { QWENWORK_INTL } from './qwenwork-product.js'
 import { maskQiniuKey } from './qiniu.js'
 // ⚠️ **本 fork 独有**（monkeycode，2026-11-02）：`maskMonkeycodeKey` 在宿主侧
 //    打码（不下发明文）；`inferMonkeycodeChannel` 让卡片显示「白泽 / 网关」，
@@ -374,6 +376,7 @@ import { handleQoderRpc } from './qoder-rpc.js'
 import { handleMinimaxIntlRpc } from './minimax-rpc.js'
 import { handleModelscopeRpc } from './modelscope-rpc.js'
 import { handleQiniuRpc } from './qiniu-rpc.js'
+import { handleQwenworkRpc } from './qwenwork-rpc.js'
 import { handleMonkeycodeRpc, monkeycodeSlotNamesOf } from './monkeycode-rpc.js'
 // ⚠️ **本 fork 独有**（baizhi，2026-11-02）：第三家吃「粘贴 Key」的渠道
 //    （主路径是浏览器登录 + 大模型商店取 `sk-`，手工粘贴只是备用）。
@@ -1916,6 +1919,17 @@ export interface JetHubAuths {
    */
   readonly qiniu: QiniuAuth
   /**
+   * 千问办公国际站（QwenWork Intl）—— **本 fork 独有**（2026-11-22）。
+   *
+   * ⚠️ 值是 `QwenworkIntlAuth` **Service 实例**（与 modelscope / qiniu 同款）。
+   * ⚠️⚠️ 与 qiniu / monkeycode **相反**：本家**有** refresh 端点
+   * （`POST /api/v1/deviceToken/refresh`，body 必须带 `target: 'c'`）⇒
+   * 值**必须**在 `SELF_HEAL_REFRESHABLE_PROVIDERS` 里（能自愈），
+   * **不是** `SELF_HEAL_EXEMPT`。接错那一侧会让
+   * `credits-balance-self-heal.spec.ts` 的正/反向守卫同时红。
+   */
+  readonly qwenworkintl: QwenworkIntlAuth
+  /**
    * MonkeyCode —— **本 fork 独有**（2026-11-02）。
    *
    * ⚠️ 值是 `MonkeycodeAuth` **Service 实例**，与 modelscope / qiniu 同款。
@@ -3189,6 +3203,17 @@ function registerJetHubEndpoints(
     //    与 loomy / zcode / modelscope / qiniu 同属「设计上没有 refresh 端点」，
     //    故显式豁免登记在 `credits-balance-self-heal.spec.ts` 的
     //    `NO_REFRESH_ENDPOINT`（那里是**反向守卫**，漏登记会红）。
+    // ⚠️ 千问办公国际站（qwenworkintl，2026-11-22）：**有**真实 refresh 端点
+    //    （`POST /api/v1/deviceToken/refresh`，body 必须带 `target` 字段，值是一个字母，
+    //    实测漏掉 `target` 会得到 401 INVALID_TOKEN —— 那个症状与「refresh token
+    //    真的失效」同形，极易误诊）⇒ **不属于** loomy / zcode / 七牛云那类
+    //    「设计上没有 refresh 端点」的豁免。
+    //    登录 access token 实测寿命 **15 天**，正落在「长时间不用后回来」的窗口内，
+    //    漏登记的后果与 issue IKKHL5 逐字相同：积分行报「未登录」而上游其实
+    //    只需一次 refresh，且**日志零字**。
+    //    ⚠️ 与 `JetHubAuths.qwenworkintl` 必须**同时**到位
+    //    （`credits-balance-self-heal.spec.ts` 有正反两条守卫，只做一个会红另一条）。
+    QWENWORK_INTL.id,
   ])
 
   /**
@@ -5161,6 +5186,17 @@ function registerJetHubEndpoints(
     //    `account.create` 也没有 qiniu 分支 ⇒ 报 `unknown provider: qiniu`。
     if (method.startsWith('qiniu.')) {
       const handled = await handleQiniuRpc(ctx, pool as never, method, payload)
+      if (handled !== undefined) return handled
+    }
+    // ⚠️ **本 fork 独有**（qwenworkintl，2026-11-22）：同一形态的第三个入口。
+    //    ⚠️ 本家与 qiniu / monkeycode 的**差别**：主入口是**设备码登录**
+    //    （`account.create` 的 `qwenworkintl` 分支），本分支只承接两个**补救**
+    //    方法（`setToken` / `removeAccount`，见 `qwenwork-rpc.ts` 模块头）。
+    //    ⚠️ 漏本分支的症状是「面板上那两个按钮点了报 unknown method、零日志」。
+    //    ⚠️ `handleQwenworkRpc` 对不认识的方法**必须返回 `undefined`**（不是
+    //    抛错/失败对象），否则主 switch 会被这里短路。
+    if (method.startsWith('qwenworkintl.')) {
+      const handled = await handleQwenworkRpc(ctx, pool as never, auths.qwenworkintl, method, payload)
       if (handled !== undefined) return handled
     }
     // ⚠️ **本 fork 独有**（monkeycode，2026-11-02）：同一形态的第二个入口。

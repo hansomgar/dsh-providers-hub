@@ -109,6 +109,9 @@ const EXPECTED_WIRED = [
   'accio', 'agnescode', 'agnescodeintl', 'astudio', 'autoclaw', 'autoclawintl', 'baizhi', 'buddy', 'codearts',
   'lobsterai', 'loomy', 'magicrew', 'magicrewintl', 'marvis', 'minimax', 'minimaxintl',
   'modelscope', 'monkeycode', 'monkeycodeintl', 'officeace', 'qoder', 'qodercn',
+  // ⚠️ 千问办公国际站（2026-11-22）：折算原语 `qwenworkExpiry`，
+  //    判据是**只看 daily_credits**（推理只扣这个池，注册赠送的 500 扣不动）。
+  'qwenworkintl',
   'trae', 'workbuddy', 'zcode',
 ]
 

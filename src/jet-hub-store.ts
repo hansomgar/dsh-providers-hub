@@ -1793,6 +1793,14 @@ const REF_PREFIX_TO_PROVIDER: ReadonlyArray<readonly [string, string]> = [
   //    `${provider.toUpperCase()}_ACCOUNT_${suffix}`（见 `qiniu-rpc.ts` 的
   //    `qiniuSlotNamesOf`），两者必须对上，否则本表认不出它。
   ['QINIU', 'qiniu'],
+  // ⚠️ **本 fork 独有**的 provider（qwenworkintl，2026-11-22）—— 同款坑又一次。
+  //    漏加 = `QWENWORKINTL_ACCOUNT_*` 的账号在 `state.json` 缺失时**静默消失**
+  //    （凭据还在 `.credentials.yaml` 里，只是索引建不出来，用户只能重新登录）。
+  // ⚠️ 前缀取 `QWENWORKINTL`（**不带下划线**）：全仓约定是
+  //    `${provider.toUpperCase()}_ACCOUNT_${suffix}`，而本 provider 的 id 是
+  //    `qwenworkintl` ⇒ 两者必须逐字对上，否则本表认不出它
+  //    （`tests/unit/jet-hub-store.spec.ts` 的恢复表用例按同一约定生成 ref）。
+  ['QWENWORKINTL', 'qwenworkintl'],
   // ⚠️ **本 fork 独有**的 provider（monkeycode，2026-11-02）—— 同款坑又一次。
   // 漏加 = `MONKEYCODE_ACCOUNT_*` 的账号在 `state.json` 缺失时**静默消失**
   //（凭据还在 `.credentials.yaml` 里，只是索引建不出来，用户只能重新粘贴 Key）。

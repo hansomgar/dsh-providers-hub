@@ -225,6 +225,13 @@ import { QiniuAuth } from './qiniu-auth.js'
 import { QiniuAdapter, registerQiniuLlm } from './qiniu-adapter.js'
 import { QINIU } from './qiniu-product.js'
 import { qiniuModelsUrl, qiniuHeaders, type QiniuCredential } from './qiniu.js'
+// ⚠️ **本 fork 独有**的 provider（qwenworkintl，2026-11-22）：千问办公国际站。
+//    协议是 OpenAI 兼容，但**推理要先换 MaaS 票据**（两段式），见
+//    `src/qwenwork-product.ts` 的模块头。
+import { QwenworkIntlAuth } from './qwenwork-auth.js'
+import { QwenworkAdapter, registerQwenworkLlm } from './qwenwork-adapter.js'
+import { QWENWORK_INTL } from './qwenwork-product.js'
+import { qwenworkHeaders, qwenworkMaasSessionUrl, type QwenworkCredential } from './qwenwork.js'
 // MonkeyCode（`monkeycode` / `monkeycodeintl`，2026-11-02）：**本 fork 独有**。
 // 无 OAuth，但**主路径是浏览器登录**（`loginViaBrowser()` 开窗读 cookie；四审
 // H-3 更正：此前这里写成「粘贴静态 Key、无登录」），粘贴 Key 只是备用入口。
@@ -823,6 +830,48 @@ export const probeById: Record<string, NonNullable<ProviderRuntime['probe']>> = 
       credentialRef: credentialRef(ref),
       slots: async () => [{ id: QINIU.id, apiKey: (credential as QiniuCredential).access_token }],
       product: QINIU,
+    }),
+  },
+  // 千问办公国际站（**本 fork 独有**）—— 设备码 OAuth + 两段式推理。
+  //
+  // ⚠️ 探测要判的是「这份凭据能不能推理」，而本家**多一道换票** ⇒ probe 也必须
+  // 走 `mintTicket`，否则探测恒失败（适配器拿不到票据就发不出请求）。
+  // ⚠️ 这里**不能**用 `qwenworkintl.mintTicket`（`probeById` 是**模块级**常量，
+  // 在 `apply()` 之前求值，此处没有实例、也没有 `ctx`）⇒ 用同一套端点裸发，
+  // 票据缓存对探测无意义（每次探测只发一次请求）。
+  qwenworkintl: {
+    createProbeAdapter: (ref, credential) => new QwenworkAdapter({
+      credentialRef: credentialRef(ref),
+      slots: async () => [{
+        id: QWENWORK_INTL.id,
+        accessToken: (credential as QwenworkCredential).access_token,
+      }],
+      product: QWENWORK_INTL,
+      mintTicket: async (slot, signal) => {
+        const response = await fetch(qwenworkMaasSessionUrl(QWENWORK_INTL), {
+          method: 'POST',
+          headers: qwenworkHeaders(slot.accessToken, 'application/json'),
+          body: JSON.stringify({ session_id: crypto.randomUUID() }),
+          ...signal === undefined ? {} : { signal },
+        })
+        const text = await response.text().catch(() => '')
+        if (!response.ok) {
+          throw new Error(`qwenworkintl: 换取推理票据失败（HTTP ${response.status}）：${text.slice(0, 200)}`)
+        }
+        const data = JSON.parse(text) as { access_token?: unknown; base_url?: unknown }
+        if (typeof data.access_token !== 'string' || data.access_token.length === 0) {
+          throw new Error('qwenworkintl: 换取推理票据的响应里没有 access_token')
+        }
+        return {
+          token: data.access_token,
+          // ⚠️ `base_url` 由上游下发，绝不硬编码（见 qwenwork-product.ts 模块头）。
+          baseUrl: typeof data.base_url === 'string' && data.base_url.length > 0
+            ? data.base_url
+            : QWENWORK_INTL.fallbackInferBase,
+          // 探测一次性使用，过期时刻无关紧要（不缓存）。
+          expiresAtMs: Date.now(),
+        }
+      },
     }),
   },
   // MonkeyCode（**本 fork 独有**）—— 粘贴静态 Key 型渠道，探测只喂**这一份凭据**。
@@ -4934,6 +4983,68 @@ export function apply(ctx: Context): void {
     //    且会掩盖池没接上的缺陷。
   })
 
+  // ===== 千问办公国际站（QwenWork Intl）—— **本 fork 独有** =====
+  //
+  // 与 qiniu **同格**：OpenAI 兼容协议（`POST /v1/chat/completions` + SSE）。
+  // ⚠️ 与 qiniu 的**三处实质差异**（全部 2026-11-22 真机实测）：
+  //
+  // 1. **鉴权是设备码 OAuth，不是粘贴静态 Key** ⇒ 有 refresh 端点、能自愈；
+  // 2. **⚠️ 推理要先换一次 MaaS 票据**（`POST /api/desktop-sessions` →
+  //    `{ access_token, base_url }`），票据 `ttl_ms = 7_200_000`（2 小时）。
+  //    换票与缓存由 `QwenworkIntlAuth.mintTicket` 承担（**单飞 + 提前 60 秒**），
+  //    适配器只通过 `mintTicket` 注入点拿票；
+  // 3. **模型目录拿不到**（`/algo/api/v2/model/list` 实测 403、`/v1/models` 实测 404）
+  //    ⇒ 适配器的目录恒来自 `QWENWORK_INTL_FALLBACK_MODELS`（9 个模型逐个实测 200）。
+  //
+  // 服务名由 QwenworkIntlAuth 依 product.id 派生，注册为 `ctx.qwenworkintlAuth`。
+  const qwenworkintl = new QwenworkIntlAuth(ctx)
+  const qwenworkintlAdapter = registerQwenworkLlm(ctx, {
+    // 单凭据回退 ref：池里没有该 provider 账号时用它（与其余 provider 同约定）。
+    credentialRef: credentialRef(QWENWORK_INTL.defaultCredentialRef),
+    // 槽序列由**接线层**解析好传进来（适配器不直接读凭据）。
+    // `modelId` 透传：据此过滤「该模型正处于限流窗口」的账号。
+    slots: async (modelId?: string) => {
+      const entries = await pool.listAccounts(QWENWORK_INTL.id)
+      const usable = await Promise.all(entries.map(async (entry) => {
+        if (!entry.enabled) return undefined
+        // ⚠️ 模型级限流标记：`modelId` 缺省时**不查**（目录路径刻意不传 ——
+        //    传了会让被限流的账号把整个目录一起拖空）。
+        if (modelId !== undefined && modelId.length > 0) {
+          const resetAt = entry.modelRateLimits?.[modelId]
+          if (typeof resetAt === 'number' && resetAt > Date.now()) return undefined
+        }
+        const resolved = await ctx.credentials.resolve(credentialRef(entry.credentialRef))
+        if (!resolved) return undefined
+        try {
+          const parsed = JSON.parse(resolved.value) as QwenworkCredential
+          if (typeof parsed.access_token !== 'string' || parsed.access_token.length === 0) return undefined
+          return { id: entry.id, accessToken: parsed.access_token }
+        } catch {
+          return undefined
+        }
+      }))
+      return usable.filter((s): s is { id: string; accessToken: string } => s !== undefined)
+    },
+    accountPool: pool,
+    product: QWENWORK_INTL,
+    // ⚠️⚠️ **MaaS 票据的换与缓存**（本家的核心差异，见 QwenworkIntlAuth 模块头）。
+    //    单飞在这一个方法内部完成 —— 适配器侧的并发请求会自动共享同一次换票。
+    mintTicket: async (slot, signal) => await qwenworkintl.mintTicket(slot.id, slot.accessToken, signal),
+    // 限流标记的**写入端**。⚠️ 读端（上面 `slots()` 里的 `modelRateLimits` 判据）
+    // 与写端必须成对存在 —— 只读不写 ⇒ 那段判据恒不命中（死代码）；
+    // 只写不读 ⇒ 标记写进池却永远不影响选号。
+    markLimited: async (slotId, modelId, resetAtMs) => {
+      await pool.updateModelRateLimit(slotId, modelId, resetAtMs)
+    },
+    // 图片走 `readImage` 单一路径，逐模型按兜底表的 `supportsImage` 声明。
+    // ⚠️ 实测 `pro` / `glm-5.3` **不收图**（400），其余 7 个正常 ⇒ 逐条声明，
+    //    绝不整表一律 true（本仓硬约定：声明支持就必须真支持）。
+    readImage: makeReadImage(ctx),
+    warn: (message) => ctx.logger?.warn?.(message),
+    // ⚠️ **黑名单与「关闭供应商」一律由共享骨架从账号池读走**：不要在这里加回
+    //    `disabledModels` / `providerClosed` 两个回调（同 qiniu 的理由）。
+  })
+
   // ===== MonkeyCode（`monkeycode` + `monkeycodeintl`）—— **本 fork 独有** =====
   //
   // 两个**独立部署**的站点（2026-11-02 实测）：国内 `monkeycode-ai.com` 与国际
@@ -6433,6 +6544,12 @@ async function fetchBalanceReading(
     //    目录。表里缺它 ⇒ 退化到已过滤的 `llm.listModels` ⇒「关闭整个 provider」
     //    时漏写黑名单 ⇒「provider 显示已关闭、模型却仍可选用」的矛盾态。
     qiniu: pruned(QINIU.id, qiniuAdapter),
+    // ⚠️ 千问办公国际站（2026-11-22）：必须进这张表，理由与 modelscope / qiniu
+    //    逐条相同 —— `provider.status` 的「已关闭」判据是 `total > 0 &&
+    //    disabled === total`，读的是 `listAllModels()` 那份**不套黑名单**的全量
+    //    目录。表里缺它 ⇒ 退化到已过滤的 `llm.listModels` ⇒「关闭整个 provider」
+    //    时漏写黑名单 ⇒「provider 显示已关闭、模型却仍可选用」的矛盾态。
+    qwenworkintl: pruned(QWENWORK_INTL.id, qwenworkintlAdapter),
     // ⚠️ MonkeyCode（2026-11-02）：必须进这张表，理由与 modelscope / qiniu 逐条
     //    相同 —— `provider.status` 的「已关闭」判据是 `total > 0 &&
     //    disabled === total`，读的是 `listAllModels()` 那份**不套黑名单**的全量
@@ -6950,6 +7067,11 @@ async function fetchBalanceReading(
       //    （`provider-runtime.ts` 的注册表是按本数组逐个 `registerProviderRuntime`
       //    建的；主循环本身不需要改）。
       ['qiniu', qiniu],
+      // ⚠️ 千问办公国际站（qwenworkintl，2026-11-22）。漏加这一行 = 它不出现在
+      //    注册表里 ⇒ 续期 / 积分 / 探测三条链路全部**静默失效**
+      //    （`provider-runtime.ts` 的注册表是按本数组逐个 `registerProviderRuntime`
+      //    建的；主循环本身不需要改）。
+      ['qwenworkintl', qwenworkintl],
       // ⚠️ MonkeyCode（2026-11-02）：漏加这一行 = 它不出现在注册表里 ⇒
       //    续期 / 积分 / 探测三条链路全部**静默失效**（`provider-runtime.ts` 的
       //    注册表是按本数组逐个 `registerProviderRuntime` 建的，主循环本身
@@ -7173,6 +7295,12 @@ async function fetchBalanceReading(
     //    `credits-balance-self-heal.spec.ts` 的反向守卫（JetHubAuths 每个键
     //    必须在自愈表或豁免表里）会红。
     qiniu,
+    // ⚠️ 千问办公国际站（qwenworkintl，2026-11-22）：值必须是
+    //    `registerProviderRuntime` 那个 registry 数组里 `['qwenworkintl', …]` 的
+    //    **同一个实例**，否则 `provider-runtime-wiring.spec.ts` 布在该实例上的
+    //    spy 收不到调用。漏加 ⇒ 客户端的 qwenworkintl 面板所有 RPC 报
+    //    `unknown provider`。
+    qwenworkintl,
     // ⚠️ MonkeyCode（2026-11-02）：值必须是 `registerProviderRuntime` 那个
     //    registry 数组里 `['monkeycode', monkeycode]` 的**同一个实例**，否则
     //    `provider-runtime-wiring.spec.ts` 布在该实例上的 spy 收不到调用。

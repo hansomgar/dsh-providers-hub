@@ -138,6 +138,11 @@ export const REFRESH_PROVIDERS = [
   // ⚠️ 两站各占一项：账池不互通、凭据 ref 前缀不同（`agnescode:` / `agnescodeintl:`）。
   'agnescode',
   'agnescodeintl',
+  // ⚠️ 千问办公国际站（`qwenworkintl`，2026-11-22）：**有**真实 refresh 端点
+  //    （`POST /api/v1/deviceToken/refresh`，body 必须带 `target` 字段），
+  //    `QwenworkIntlAuth.refreshAccountCredential` 续期并回写凭据 + 池内 `expiresAt`
+  //    ⇒ 不属 loomy / zcode 那类豁免。漏了它 `account.refresh` 行为覆盖为零。
+  'qwenworkintl',
 ] as const
 
 /**

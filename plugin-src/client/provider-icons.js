@@ -1,4 +1,4 @@
-/**
+﻿/**
  * 各 provider 面板图标的**纯数据模块**（每个渠道一条 base64 / SVG data URI，
  * 条数 = `src/provider-registry.ts` 的 id 数，故**不在此写死数字**）。
  *
@@ -220,6 +220,17 @@ const MODELSCOPE_ICON = 'data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3d
 const QINI_ICON = 'data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCI+PHJlY3Qgd2lkdGg9IjI0IiBoZWlnaHQ9IjI0IiByeD0iNSIgZmlsbD0iIzBBNkNGRiIvPjxwYXRoIGQ9Ik0xMiA1LjZjLTIuOSAwLTUuMSAyLjItNS4xIDUuMXYyLjZjMCAyLjkgMi4yIDUuMSA1LjEgNS4xIDEuMyAwIDIuNS0uNSAzLjQtMS4zbDEuOSAxLjkgMS4yLTEuMi0xLjktMS45Yy44LS45IDEuMy0yLjEgMS4zLTMuNHYtMS44YzAtMi45LTIuMi01LjEtNS4xLTUuMXptMy41IDUuMXYxLjhjMCAuNy0uMiAxLjMtLjUgMS45bC0yLjMtMi4zIDEuMi0xLjIgMi4zIDIuM2MtLjItLjEtLjQtLjItLjctLjJ2LTIuM2MwLTEuNy0xLjMtMy0zLTNzLTMgMS4zLTMgM3YyLjZjMCAxLjcgMS4zIDMgMyAzIC45IDAgMS43LS40IDIuMy0xbDEuMiAxLjJjLS45LjgtMi4xIDEuMy0zLjUgMS4zLTIuNCAwLTQuMy0xLjktNC4zLTQuM3YtMi42YzAtMi40IDEuOS00LjMgNC4zLTQuM3M0LjMgMS45IDQuMyA0LjN6IiBmaWxsPSIjZmZmIi8+PC9zdmc+';
 
 /**
+ * 千问办公国际站（`qwenworkintl`，本 fork 独有，2026-11-22）。
+ *
+ * ⚠️ **自制占位图标**：阿里巴巴千问办公没有可内联的官方小图标资源
+ *    （官网 favicon 是位图且含中文，20×20 下不可读）⇒ 与 qiniu / marvis /
+ *    agnescode 同款做法，用品牌色圆角方块 + `QW` 字样占位。
+ * 图形：紫色（#615CED，千问品牌紫）圆角方块 + 白色 QW。
+ * ⚠️ **待补充**：若日后拿到官方 SVG，替换此常量即可（键名不变）。
+ */
+const QWENWORKINTL_ICON = 'data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCI+PHJlY3Qgd2lkdGg9IjI0IiBoZWlnaHQ9IjI0IiByeD0iNSIgZmlsbD0iIzYxNUNFRCIvPjx0ZXh0IHg9IjEyIiB5PSIxNi41IiBmb250LWZhbWlseT0ic3lzdGVtLXVpLC1hcHBsZS1zeXN0ZW0sc2Fucy1zZXJpZiIgZm9udC1zaXplPSIxMCIgZm9udC13ZWlnaHQ9IjcwMCIgZmlsbD0iI2ZmZiIgdGV4dC1hbmNob3I9Im1pZGRsZSI+UVc8L3RleHQ+PC9zdmc+';
+
+/**
  * MonkeyCode（`monkeycode` / `monkeycodeintl`，本 fork 独有，2026-11-02）。
  *
  * ⚠️ **官方图标**（2026-11-02 替换掉手绘占位）：取自官网
@@ -394,6 +405,10 @@ export const PROVIDER_ICONS = {
   magicrewintl: MAGICREW_ICON,
   // ⚠️ **本 fork 独有**（七牛云）：占位图标（见 QINI_ICON 注释，待替换官方 SVG）。
   qiniu: QINI_ICON,
+  // ⚠️ 千问办公国际站（2026-11-22，本 fork 独有）：自制占位图标（见
+  //    QWENWORKINTL_ICON 注释）。漏加这行 ⇒ `provider-icon-coverage.spec.ts`
+  //    与 `provider-registry.spec.ts` 的「键集合 == registry id 集合」断言变红。
+  qwenworkintl: QWENWORKINTL_ICON,
   // ⚠️ **本 fork 独有**（MonkeyCode，2026-11-02）：**官方 logo**（见 MONKEYCODE_ICON
   //    注释）。漏加这行会让 `provider-icon-coverage.spec.ts` 红。
   monkeycode: MONKEYCODE_ICON,

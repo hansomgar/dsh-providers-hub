@@ -128,6 +128,7 @@ import type { ZcodeCredential } from './zcode.js'
 //    （`magicrew-credits.ts` 的 `magicrewExpiry`）—— 本表只做「凭据 → 它要的入参」
 //    这一层映射，**绝不重算折算**（本仓库红线：折算映射只许有一份）。
 import { magicrewExpiry } from './magicrew-credits.js'
+import { qwenworkExpiry } from './qwenwork-credits.js'
 import { MAGICREW, MAGICREW_INTL } from './magicrew-product.js'
 import { parseMagicrewCredential } from './magicrew-auth.js'
 import type { ProviderRuntime } from './provider-runtime.js'
@@ -475,6 +476,35 @@ export function createProviderExpiry(deps: ProviderExpiryDeps = {}): Readonly<Re
           jwt: credential?.jwt ?? '',
           organizationCode: credential?.organizationCode ?? '',
           product: MAGICREW_INTL,
+          ...context?.cachedBalance === undefined
+            ? {}
+            : {
+                cachedBalance: () => context.cachedBalance!(context.accountId) as Promise<CreditBalance | null | undefined>,
+              },
+        })
+      },
+    },
+    /**
+     * **千问办公国际站**（`qwenworkintl`，2026-11-22）。
+     *
+     * ⚠️⚠️ **本家的折算判据与所有别家都不同：只看 `daily_credits`。**
+     *
+     * 实测（2026-11-22 真机，同一账号）：钱包里有两个池
+     * （`daily 200` 次日 00:00 到期 + `longterm 500` 三个月后到期），
+     * 而推理**只扣 daily** —— 实测 `daily 200 → 199.8368` 而 `longterm` 纹丝不动。
+     *
+     * ⇒ 若照 buddy 那套「按 remaining 之和判可用」，daily 烧光后仍会算出
+     * 「还有 500」⇒ 账号被排进候选 ⇒ **每轮先 429 一次**（`balance_insufficient`）。
+     * 故原语 `qwenworkExpiry` 的可用性判据是 daily，不是合计。
+     *
+     * ⚠️ 三处必须同改（`WIRED_EXPIRY_PROVIDERS` + 本表 + 折算原语）——
+     * `expiry-runtime-parity.spec.ts` 真跑 `apply()` 锁一致性。
+     */
+    qwenworkintl: {
+      credentialExpiry: async (c, context) => {
+        const credential = c as { access_token?: unknown }
+        return await qwenworkExpiry({
+          accessToken: typeof credential?.access_token === 'string' ? credential.access_token : '',
           ...context?.cachedBalance === undefined
             ? {}
             : {

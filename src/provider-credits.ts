@@ -72,6 +72,11 @@ import { claimRaccoonDailyCheckin, fetchRaccoonCreditBalance } from './raccoon-c
 // ⚠️ **本 fork 独有**（魔搭，2026-10-17）：魔粒余额原语。
 import { claimModelscopeDaily } from './modelscope-checkin.js'
 import { fetchModelscopeBalanceDetailed } from './modelscope-credits.js'
+// ⚠️ 千问办公国际站（2026-11-22，本 fork 独有）：
+//    ⚠️ 只有 `fetchBalanceDetailed`，**没有 `claim`** —— 国际站没有领取端点
+//    （逐个探测 16 个候选全 404），额度由服务端每日自动发放。
+import { fetchQwenworkBalanceDetailed } from './qwenwork-credits.js'
+import type { QwenworkCredential } from './qwenwork.js'
 import type { ModelscopeCredential } from './modelscope.js'
 import { MODELSCOPE } from './modelscope-product.js'
 // ⚠️ 腾讯 Marvis（2026-11-09）：钱包余额原语（`/v3/marvis_get_wallet`）。
@@ -541,6 +546,33 @@ export function createProviderCredits(
       precheckStatus: false,
       claim: (credential) => claimModelscopeDaily(credential as ModelscopeCredential),
     },
+
+  /**
+   * 千问办公国际站（`qwenworkintl`，本 fork 独有，2026-11-22）。
+   *
+   * 端点 `GET https://qwenwork.ai/user/wallets`（`Authorization: Bearer`，
+   * ⚠️ **cookie 一律 401**，实测 4 种 cookie 组合全失败）实测 200 返回
+   * `{ daily_credits:{total_balance:200}, monthly_credits:{…},
+   *   longterm_credits:{total_balance:500}, active_wallets:{wallets:[…]} }`。
+   *
+   * ⚠️⚠️ **三个池必须分开，`total` 取 daily**（`buildQwenworkBalance` 已如此）：
+   * 推理**只扣 daily**（实测 `daily 200 → 199.8368` 而 `longterm` 纹丝不动）⇒
+   * 把合计 700 当「每天可用」会让用户在 200 烧完后收到 `balance_insufficient`
+   * 却看到「还有 500」；用合计判耗尽会漏判。
+   *
+   * ⚠️ **`claim` 刻意不存在**（`dailyCheckin: false`）：逐个探测 16 个候选领取
+   * 端点**全部 404**；国内站那套 `/api/marketing/benefits/claim` 在国际站
+   * **也是 404**（国内站是 401 = 存在）⇒ 国际站的额度是**服务端每日自动发放**，
+   * 没有任何「领取」动作可调。
+   *
+   * ⚠️ 用 `fetchBalanceDetailed`（不是 `fetchBalance`）：401（token 失效 ⇒ 重新
+   * 登录）/ 缺字段（上游改版 ⇒ 报「读数格式变了」）两种失败的**用户动作**完全不同，
+   * 压成笼统的「查询失败」会误导。
+   */
+  qwenworkintl: {
+    fetchBalanceDetailed: async (credential) =>
+      await fetchQwenworkBalanceDetailed(credential as QwenworkCredential),
+  },
 
     /**
      * 腾讯 Marvis（2026-11-09）：**本 fork 独有**。

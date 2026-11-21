@@ -91,6 +91,9 @@ const AUTH_SERVICE: Readonly<Record<string, string>> = {
   modelscope: 'modelscopeAuth',
   // ⚠️ **本 fork 独有**（qiniu，2026-10-29）。服务名同理由派生 ⇒ `qiniuAuth`。
   qiniu: 'qiniuAuth',
+  // ⚠️ 千问办公国际站（2026-11-22，本 fork 独有）：服务名由 `${product.id}Auth`
+  //    派生 ⇒ `qwenworkintlAuth`（全小写，与 provider id 同形）。
+  qwenworkintl: 'qwenworkintlAuth',
   // ⚠️ Codely（Unity，2026-10-22 A6）：服务名 `codelyAuth`（全小写，与 provider id 同形）。
   //    ⚠️ `CodelyAuth` 已从裸类改为 `extends Service`（否则 ctx 上永远没有
   //    `codelyAuth`，本表取不到实例）—— 见 `codely-auth-service.ts` 的类注释。
@@ -377,7 +380,8 @@ describe('★ registerJetHubRpc 的命名对象接线（真跑 apply + account.r
     //    （三审 F🟢-5：本处原只写到 25，而断言已是 27 —— 注释漏了一步就会让
     //     下一个加 provider 的人以为“上次是 25”而把数字写回 25。）
     // ⚠️ 2026-11-19 加 agnescode + agnescodeintl（AgnesCode 两站）：28 → 30。
-    expect(EXPECTED_AUTH_PROVIDER_IDS).toHaveLength(30)
+    // ⚠️ 2026-11-22 加 qwenworkintl（千问办公国际站）：30 → 31。
+    expect(EXPECTED_AUTH_PROVIDER_IDS).toHaveLength(31)
     // 另一方向（原断言的**全部**证明力都在这条上，单独留着免得它随上面那条一起消失）：
     // 表里的每个键都必须是 registry 里真实存在的 provider id（防拼写错误造成的僵尸项）。
     for (const id of Object.keys(AUTH_SERVICE)) {

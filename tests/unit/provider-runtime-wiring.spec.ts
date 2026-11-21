@@ -101,6 +101,9 @@ const AUTH_SERVICE_OF: ReadonlyArray<readonly [string, string]> = [
   // ⚠️ **本 fork 独有**（qiniu，2026-10-29）。服务名由 `${product.id}Auth` 派生
   //    ⇒ `qiniuAuth`。同款坑：本表由**真跑 apply() 的探针**验证过，不凭注释推断。
   ['qiniu', 'qiniuAuth'],
+    // ⚠️ 千问办公国际站（qwenworkintl，2026-11-22）：服务名 `qwenworkintlAuth`
+    //    （由 `${product.id}Auth` 派生，全小写、与 provider id 同形）。
+    ['qwenworkintl', 'qwenworkintlAuth'],
   // ⚠️ 超级麦吉（Magicrew，2026-10-29）：服务名由 `${product.id}Auth` 派生 ⇒ `magicrewAuth`。
   ['magicrew', 'magicrewAuth'],
   // ⚠️ MagiCrew 国际版（2026-11-01）：服务名同理由派生 ⇒ `magicrewintlAuth`。
@@ -468,7 +471,8 @@ describe('★ index.ts 的能力注册表接线（行为断言，替代源码文
     // 2026-11-02: baizhi 接入后 26 -> 27。
     // 2026-11-09: marvis 接入后 27 -> 28。
     // 2026-11-19: agnescode + agnescodeintl 接入后 28 -> 30（两站各一个 id）。
-    expect(shouldRegister, 'channel 集合变了，请复核 opencode 豁免是否仍成立').toHaveLength(30)
+    // 2026-11-22: qwenworkintl 接入后 30 -> 31。
+    expect(shouldRegister, 'channel 集合变了，请复核 opencode 豁免是否仍成立').toHaveLength(31)
     expect(
       registeredRuntimeIds().sort(),
       'registry 里有账号的 provider 必须都注册进能力注册表（左侧多出 = 清单里多了僵尸项，' +
@@ -529,6 +533,10 @@ describe('★ index.ts 的 probe 域接线（Task 8 复审补齐：此前零守�
     //    （`qiniu-adapter.ts` 的 `qiniuRetryAfterMs`：429 指数退避 / 额度类对齐
     //    UTC+8 次日零点）⇒ 与 registry 里**省略 `rateLimit`（= true）**自洽。
     ['qiniu-adapter.ts', ['qiniu']],
+    // ⚠️ 千问办公国际站（qwenworkintl，2026-11-22）：`qwenwork-adapter.ts` 会写
+    //    `modelRateLimits`（`qwenworkRetryAfterMs`）⇒ 与 registry 里省略
+    //    `rateLimit`（= true）自洽。
+    ['qwenwork-adapter.ts', ['qwenworkintl']],
     // ⚠️ minimax **曾经**登记为空（不写标记）—— 2026-10-11 的 issue IKJW32 给它
     //    接上请求级换号 + 冷却后，它会写 `modelRateLimits`（额度 24h / 限流 1h）。
     //    下面那条「登记为不写标记的确实没有写点」用例就是靠这个变化**红**出来的。
