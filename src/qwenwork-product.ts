@@ -196,7 +196,33 @@ export interface QwenworkFallbackModel {
   contextWindow: number
   /** 是否支持图片输入（**逐模型实测**，见模块头的图片矩阵）。 */
   supportsImage: boolean
-  /** 支持的思考档位（上游 wire 值，**强度序弱 → 强**）。 */
+  /**
+   * 支持的思考档位（上游 wire 值，**强度序弱 → 强**）。
+   *
+   * ⚠️⚠️ **四档全部实测生效**（2026-11-22 真机，每档采样 2~3 次看
+   * `reasoning_tokens` 均值）。以 `pro` 为例，四档严格递增：
+   *
+   * | 档位 | reasoning_tokens 均值 |
+   * |---|---|
+   * | `low` | 29 |
+   * | `medium` | 53 |
+   * | `high` | 67 |
+   * | **`max`** | **419** |
+   *
+   * ⇒ **`max` 是真实档位且效果最强**（`pro` 上约 14 倍、`glm-5.3` 约 10 倍、
+   * `flash` 约 2.5 倍）。早先只声明 `['low', 'high']` 是**漏了**两档 ——
+   * 根因是当时只测了「high 会让 reasoning_tokens 从 0 变正」这一个判据，
+   * 没意识到中间还有梯度。
+   *
+   * ⚠️ **顺序必须是强度序（弱 → 强）**：DSH 把它当**展示顺序**
+   * （`dsh-llm` 的类型注释 `adapter-preferred display order`），
+   * 官方客户端直接 `map` 不排序 ⇒ 顺序反了会变成「左强右弱」
+   * （本仓 `protocol-wire.md` 记录过这个不变式）。
+   *
+   * ⚠️ **不声明 `minimal` / `xhigh` / `none` / `auto`**：这几个值上游虽然也回
+   * 200（**不做白名单校验**），但实测**无独立效果**（与不传该字段的基线无差别）
+   * ⇒ 声明它们只会给用户一个「选了没反应」的菜单。
+   */
   efforts?: readonly string[]
 }
 
@@ -225,17 +251,17 @@ export interface QwenworkFallbackModel {
  */
 export const QWENWORK_INTL_FALLBACK_MODELS: readonly QwenworkFallbackModel[] = [
   // ── 实测最快的档位（0.0933 分/10k 输入，200 分可跑约 2000 轮）──
-  { id: 'flash', name: '标准 (flash)', contextWindow: 1_000_000, supportsImage: true, efforts: ['low', 'high'] },
-  { id: 'glm-5.3-flash', name: 'GLM-5.3 Flash', contextWindow: 1_000_000, supportsImage: true, efforts: ['low', 'high'] },
-  { id: 'deepseek-flash', name: 'DeepSeek Flash', contextWindow: 1_000_000, supportsImage: true, efforts: ['low', 'high'] },
+  { id: 'flash', name: '标准 (flash)', contextWindow: 1_000_000, supportsImage: true, efforts: ['low', 'medium', 'high', 'max'] },
+  { id: 'glm-5.3-flash', name: 'GLM-5.3 Flash', contextWindow: 1_000_000, supportsImage: true, efforts: ['low', 'medium', 'high', 'max'] },
+  { id: 'deepseek-flash', name: 'DeepSeek Flash', contextWindow: 1_000_000, supportsImage: true, efforts: ['low', 'medium', 'high', 'max'] },
   // ── 高级档位 ──
   // ⚠️ `pro` 与 `glm-5.3` **不收图**（实测 400），故 supportsImage: false。
-  { id: 'pro', name: '高级 (pro)', contextWindow: 1_000_000, supportsImage: false, efforts: ['low', 'high'] },
-  { id: 'glm-5.3', name: 'GLM-5.3', contextWindow: 1_000_000, supportsImage: false, efforts: ['low', 'high'] },
-  { id: 'deepseek-v4-pro', name: 'DeepSeek V4 Pro', contextWindow: 1_000_000, supportsImage: true, efforts: ['low', 'high'] },
-  { id: 'qwen3.8-max', name: 'Qwen3.8-Max', contextWindow: 1_000_000, supportsImage: true, efforts: ['low', 'high'] },
-  { id: 'qwen4-max', name: 'Qwen4-Max', contextWindow: 1_000_000, supportsImage: true, efforts: ['low', 'high'] },
-  { id: 'kimi-k3.1-pro', name: 'Kimi K3.1 Pro', contextWindow: 1_000_000, supportsImage: true, efforts: ['low', 'high'] },
+  { id: 'pro', name: '高级 (pro)', contextWindow: 1_000_000, supportsImage: false, efforts: ['low', 'medium', 'high', 'max'] },
+  { id: 'glm-5.3', name: 'GLM-5.3', contextWindow: 1_000_000, supportsImage: false, efforts: ['low', 'medium', 'high', 'max'] },
+  { id: 'deepseek-v4-pro', name: 'DeepSeek V4 Pro', contextWindow: 1_000_000, supportsImage: true, efforts: ['low', 'medium', 'high', 'max'] },
+  { id: 'qwen3.8-max', name: 'Qwen3.8-Max', contextWindow: 1_000_000, supportsImage: true, efforts: ['low', 'medium', 'high', 'max'] },
+  { id: 'qwen4-max', name: 'Qwen4-Max', contextWindow: 1_000_000, supportsImage: true, efforts: ['low', 'medium', 'high', 'max'] },
+  { id: 'kimi-k3.1-pro', name: 'Kimi K3.1 Pro', contextWindow: 1_000_000, supportsImage: true, efforts: ['low', 'medium', 'high', 'max'] },
 ]
 
 /** 该模型是否为兜底表里登记过的。 */

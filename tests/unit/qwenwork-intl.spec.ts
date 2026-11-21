@@ -139,9 +139,24 @@ describe('产品配置', () => {
    * ⚠️ **档位顺序 = 强度序（弱 → 强）**（本仓 `protocol-wire.md` 的不变式：
    * DSH 把它当展示顺序，铺成横向轴时顺序反了会变成「左强右弱」）。
    */
-  it('思考档位是 [low, high] 且为强度序', () => {
+  /**
+   * ⚠️⚠️ **四档必须全部声明，且是强度序（弱 → 强）**。
+   *
+   * 2026-11-22 真机实测（每档采样 2~3 次看 reasoning_tokens 均值），
+   * 以 `pro` 为例四档严格递增：low 29 → medium 53 → high 67 → **max 419**。
+   *
+   * ⚠️ 早先只声明 `['low','high']` 是**漏了两档** —— 当时只测了
+   * 「high 让 reasoning_tokens 从 0 变正」这一个判据，没意识到还有梯度。
+   * 这条断言就是防止再漏。
+   */
+  it('★★ 思考档位是四档且为强度序（low → medium → high → max）', () => {
     for (const m of QWENWORK_INTL_FALLBACK_MODELS) {
-      expect(m.efforts, `${m.id} 应声明档位`).toEqual(['low', 'high'])
+      expect(m.efforts, `${m.id} 应声明四档`).toEqual(['low', 'medium', 'high', 'max'])
+      // ⚠️ 反向：绝不能只有两档（那是漏声明）。
+      expect(m.efforts, `${m.id} 不能只声明 low/high`).not.toEqual(['low', 'high'])
+      // ⚠️ 强度序：max 必须在最后（DSH 按此顺序展示，反了会「左强右弱」）。
+      expect(m.efforts?.[m.efforts.length - 1]).toBe('max')
+      expect(m.efforts?.[0]).toBe('low')
     }
   })
 })
@@ -632,7 +647,7 @@ describe('适配器契约', () => {
     const adapter = makeAdapter()
     const resolved = await adapter.resolveModel('qwenworkintl', 'glm-5.3')
     expect(resolved.context?.contextWindow).toBe(1_000_000)
-    expect(resolved.reasoning?.efforts.map((e) => e.id)).toEqual(['low', 'high'])
+    expect(resolved.reasoning?.efforts.map((e) => e.id)).toEqual(['low', 'medium', 'high', 'max'])
     // ⚠️ glm-5.3 实测不收图。
     expect(resolved.inputModalities).toEqual(['text'])
   })

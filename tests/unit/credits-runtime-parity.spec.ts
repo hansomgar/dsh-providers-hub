@@ -479,7 +479,8 @@ describe('★ windowDays 由 registry 的 usesExpiryWindow 驱动（不是「是
     expect(withWindow).toEqual([
       'astudio', 'autoclaw', 'autoclawintl', 'buddy', 'codearts', 'lobsterai',
       'magicrew', 'magicrewintl', 'minimax', 'minimaxintl', 'officeace',
-      'qoder', 'qodercn', 'trae', 'workbuddy',
+      // ⚠️ 2026-11-22 加 qwenworkintl（逐包带真实到期时刻）。
+      'qoder', 'qodercn', 'qwenworkintl', 'trae', 'workbuddy',
     ])
   })
 })

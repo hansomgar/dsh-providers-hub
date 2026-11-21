@@ -932,11 +932,17 @@ export const PROVIDER_REGISTRY: readonly ProviderDescriptor[] = Object.freeze([
     //   "longterm_credits": { "total_balance": 500 } }  ← 注册赠送，推理**不扣**
     // ```
     //
-    // ⚠️⚠️ **三个池必须分开呈现**（`src/qwenwork-credits.ts` 的模块头详述）：
-    // `quota.remaining` 是**合计 700**，而推理只扣 daily。把 700 当「每天可用」
-    // 会让用户在 200 烧完后收到 `balance_insufficient` 却看到「还有 500」；
-    // 用合计判耗尽会**漏判**（daily 已空但合计还有 500 ⇒ 实际已不可用）。
-    // ⇒ `buildQwenworkBalance` 的 `total` 取 **daily**，longterm 单独成一个包。
+    // ⚠️⚠️ **额度是瀑布扣减：先扣 daily，daily 空了扣 longterm**
+    // （2026-11-22 晚实测纠错 —— 先前这里写的是「推理只扣 daily」，那是
+    //  只测了新账号 daily 未耗尽那一段造成的误判）：
+    //
+    // - 新账号：`daily 200 / longterm 500` ⇒ 发请求后 daily 下降、longterm 不动；
+    // - daily 耗尽的账号：`daily 0 / longterm 378` ⇒ 推理照样 200，
+    //   且扣的是 longterm（`378.0028 → 378.0011`）。
+    //
+    // ⇒ `buildQwenworkBalance` 的 `total` = **daily + longterm**（可消耗池之和）。
+    //   `monthly_credits` 不计入（订阅额度，免费版恒 0）。
+    //   ⚠️ 旧实现取 daily ⇒ `daily=0` 的账号显示 0 + 「查询失败」（真实报障）。
     //
     // ⚠️⚠️ **`dailyCheckin: false` 同样是实测结论，不是漏接线。**
     // 逐个探测 16 个候选领取端点**全部 404**；国内站那套营销活动端点
@@ -954,6 +960,27 @@ export const PROVIDER_REGISTRY: readonly ProviderDescriptor[] = Object.freeze([
     //     `credits.balance === true` 过滤）；
     //   - **不进** `SELF_HEAL_EXEMPT`（本家**有** refresh 端点，能自愈）。
     credits: { balance: true, dailyCheckin: false },
+    /**
+     * ⚠️ **`creditPackages: true`**（2026-11-22 补）：本家**能给出逐包明细**
+     * （`buildQwenworkPackages` 按 `active_wallets.wallets[]` 逐个产出包，
+     * 每个包都带 `expiredTime`）⇒ 面板据此渲染「长期 / 短期 / 临期」分档。
+     *
+     * 漏了它 ⇒ 面板只显示**一个总数**，用户看不出「哪些明天就过期、
+     * 哪些三个月后才过期」—— 而那正是本插件其他 provider 都有的能力。
+     */
+    creditPackages: true,
+    /**
+     * ⚠️ **`usesExpiryWindow: true`**：本家的包**确实带真实到期时刻**
+     * （实测：daily 次日 00:00、longterm 三个月后）⇒ 分档窗口
+     * （`windowDays` / `imminentDays`，支持设置项与环境变量覆盖）对它有意义。
+     *
+     * 与「有余额但不下发到期时间」那类（modelscope / marvis 的 `NEVER`）
+     * 刻意不同：那些家加这个位会让面板文案说「按天数筛选」而实际筛不了。
+     */
+    usesExpiryWindow: true,
+    // ⚠️ **`permanentLock` 刻意不加**：本家**没有**「永久积分」概念 ——
+    //    daily 次日就刷新、longterm 三个月后到期，两者都有真实期限。
+    //    加它会渲染出「锁定永久积分」按钮，而底层没有对应的锁定表。
     // ⚠️ **rateLimit 省略（= true）**：适配器**确实会写** modelRateLimits
     //   （`qwenworkRetryAfterMs`：429 走指数退避、`balance_insufficient` 归额度）。
     //   接线层注入了 `markLimited` ⇒「重测 / 重置」两个按钮都该保留。

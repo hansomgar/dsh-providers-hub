@@ -332,10 +332,12 @@ describe('从 registry 派生的能力表与既有断言逐条相等', () => {
     //    （`magicrewParseExpiresAt` 按 UTC+8 解析到 `deductionEndTime`），而合成包
     //    **不带**到期时间 ⇒ 「有到期时间」与「没有到期时间」两种包同时存在，
     //    正是三档判据要的那组输入。⚠️ 两站各占一项。
+    // ⚠️ 2026-11-22 加 qwenworkintl（千问办公国际站）：逐包带真实到期时刻
+    //    （daily 次日 00:00、longterm 三个月后）⇒ 15 → 16 家。
     expect(win).toEqual([
       'astudio', 'autoclaw', 'autoclawintl', 'buddy', 'codearts', 'lobsterai',
       'magicrew', 'magicrewintl', 'minimax', 'minimaxintl', 'officeace', 'qoder',
-      'qodercn', 'trae', 'workbuddy',
+      'qodercn', 'qwenworkintl', 'trae', 'workbuddy',
     ])
   })
 
