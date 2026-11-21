@@ -144,6 +144,77 @@ GET https://qwenwork.ai/user/wallets
 - **reasoning**：响应里 `message.reasoning_content` 是思考过程、
   `usage.completion_tokens_details.reasoning_tokens` 是思考 token 数。
 
+### 6.2.1 ⚠️⚠️ 工具定义**必须包成两层**，否则每次带工具都 400
+
+**这是本 provider 实现期踩到的真实缺陷**（2026-11-22，第一版内联拼 body 时漏了）。
+
+DSH 下发的是**扁平** `ToolSchema`：
+
+```ts
+{ name: 'get_weather', description: '…', parameters: {...} }
+```
+
+直接塞进 body 的 `tools` ⇒ 上游回 **HTTP 400 `invalid_request`**：
+
+```json
+{"error":{"code":"invalid_request","message":"invalid request","param":null,"type":"invalid_request_error"}}
+```
+
+而 DSH 几乎**每轮**都带工具 ⇒ 症状是「渠道能加、模型能选、一发消息就报错」，
+报文只有一句 `invalid_request`，**完全指不出是工具形状的问题**。
+
+包围成 OpenAI 形状后实测 **200 + `finish_reason: "tool_calls"`**：
+
+```json
+{"type":"function","function":{"name":"get_weather","description":"…","parameters":{…}}}
+```
+
+⚠️ 这与本仓 `qiniu-messages.ts` 记录的
+**`'type' is a required property - 'tools.0'`** 是**同型同因**（七牛云那边同样踩过）。
+
+⇒ 故本家也把 wire 装配收敛进独立文件 `src/qwenwork-messages.ts`
+（`buildQwenworkTools` / `buildQwenworkPayload`），**适配器内绝不内联拼 body**。
+守卫 `tests/unit/qwenwork-messages.spec.ts` 有 13 条，其中两条专挡这个坑：
+①逐字节断言两层包裹；②整体序列化后断言含 `"tools":[{"type":"function",…`。
+
+**变异验证**：把包装改回扁平 ⇒ 6 条变红（已实测）。
+
+### 6.2.2 ⚠️ 另两处 wire 契约（第一版也写错了）
+
+| 项 | 错法 | 后果 | 正确做法 |
+|---|---|---|---|
+| `system` | 放**顶层** `payload.system` | OpenAI 兼容上游只从 `messages[]` 读系统提示词，顶层**被静默忽略** ⇒ 插件里配的系统提示词**完全没生效**而界面一切正常 | `foldSystemIntoMessages` 折进 `messages[0]` |
+| `max_tokens` | 用 `max_completion_tokens` | 上游不认这个键 | 用 `max_tokens`，且只放行**安全正整数**（0/负数/NaN 会让 DSH 抛 `INVALID_MODEL_MAX_TOKENS` 把整轮搞崩） |
+
+### 6.2.3 ⚠️ 工具调用在 `StreamChunk` 里是**三段**，不是单个事件
+
+排查时容易误判成「工具调用没工作」。实际形态：
+
+```
+block-start(index, blockType:'tool-call')
+  → tool-call-delta(index, id, name, argumentsDelta)   × N
+  → block-end(index, block:{ type:'tool-call', id, name, arguments })   ← 完整调用在这里
+```
+
+⇒ **判据要读 `block-end` 的 `block.type === 'tool-call'`**，
+用 `c.type === 'tool-call'` 去 filter 会恒得 0（我第一版验证脚本就是这么误判的）。
+
+⚠️ 上游的 SSE 帧里 `name` **只在第一帧出现**，后续帧只有 `arguments` 增量
+（实测：帧1 带 `name`+`id`，帧2~4 只有 `arguments`+`index`）。
+`consumeOpenAiSse` 已正确处理（首帧即有 name ⇒ 立即 `block-start` + 补发已累积参数）。
+
+### 6.2.4 ⚠️ 图片附件必须带 `attachmentId`
+
+`collectImages`（`openai-compat.ts`）只认：
+
+```ts
+{ type: 'image', attachment: { attachmentId: string } }
+```
+
+只给 `{ mediaType, data }` ⇒ **图片压根不被识别**（等于没发图），
+于是「不支持图片的模型」那道闸也不会触发 ——
+表现为「以为测了图片通路，其实什么都没测」（我第一版验证脚本也踩了这个）。
+
 ### 6.3 ⚠️ `reasoning_effort` 实测生效（与 magpie 的结论不同）
 
 | 请求 | reasoning_tokens | 有 reasoning_content |
@@ -219,3 +290,55 @@ GET https://qwenwork.ai/user/wallets
 - ⚠️ **500 注册赠送的 3 个月到期后是否还有额度**：未验证。
 - ⚠️ 国内站的「个人基础版 500/月」与本站的 200/天**不可叠加**（账号体系不同）。
 - ⚠️ 上游 `desktop-sessions` 的 `session_id` 语义未深究（每次传新 uuid 实测可用）。
+
+## §11 本机加载验证（2026-11-22）
+
+不只看 `tsc` 与单测，还实测了「插件真的能被加载、provider 真的在表里」：
+
+| 验证 | 结果 |
+|---|---|
+| `import('lib/index.js')` | ✅ 成功，导出 `apply` / `inject` / `probeById` / `Config` / `name` / `makeReadImage` |
+| `PROVIDER_REGISTRY` 含 `qwenworkintl` | ✅ 共 34 个，`credits={balance:true,dailyCheckin:false}`、`channel:true`、`rateLimit` 省略(=true) |
+| `creditCapabilitiesOf()['qwenworkintl']` | ✅ 派生正确 |
+| `WIRED_EXPIRY_PROVIDERS` 含它 | ✅ 共 26 条 |
+| auth / adapter / rpc 三类导出 | ✅ 全部正确 |
+| `qwenworkSlotNamesOf('uid-x').refName` | ✅ `QWENWORKINTL_ACCOUNT_UIDX`（符合全仓约定） |
+
+### 11.1 ★ 真跑 `apply()` 的接线守卫（本仓最权威的那几条）
+
+这几条**不是源码文本断言**，而是真建 ctx、真调 `apply()`、再比对**实例身份**：
+
+- `provider-runtime-wiring.spec.ts` 的
+  「★ 每个有余额能力的渠道都挂上了 credits 域」—— `qwenworkintl` 声明了
+  `balance:true` ⇒ 必须挂，漏了即点名变红；
+- 同文件的「★★ src 下每个 `*-adapter.ts` 都在 `WRITE_SITE_FILES` 里」——
+  新增 `qwenwork-adapter.ts` 必须登记（否则它写限流标记这件事零覆盖）；
+- `jet-hub-rpc-auth-wiring.spec.ts` 的
+  「★★ 每个 provider id 的续期都分派到**自己**的 auth 实例」——
+  真跑 `account.refresh`，错接即红。
+
+### 11.2 三个可复跑的验证脚本（都在 `scripts/`）
+
+| 脚本 | 用途 | 需要凭据 |
+|---|---|---|
+| `verify-qwenwork-intl.mjs` | 端到端：目录 / listModels / 流式对话 / 工具调用 / 两条错误路径 | ✅ `QW_TOKEN` |
+| `verify-qwenwork-tools.mjs` | 逐帧打印工具调用三段，确认 `block-end` 里有完整调用 | ✅ `QW_TOKEN` |
+| `verify-qwenwork-wiring.mjs` | **不需要凭据**：只验模块能否 import + 三张接线表 | ❌ |
+
+⚠️ `QW_TOKEN` 是 `qwenwork.ai` 的登录 access token（从网页 `token` cookie 或
+`/user/wallets` 请求的 `Authorization` 头里取）。
+**实测有效期 15 天**，过期后重新取一个即可。
+
+### 11.3 端到端实测结论（2026-11-22，`scripts/verify-qwenwork-intl.mjs`）
+
+```
+1. listAllModels      ✅ 9 个模型
+2. listModels         ✅ contextWindow=1000000，modalities=text+image
+3. prepareCall+流式    ✅ 2579ms / 101 帧 / 正文正确 / usage 有 reasoningTokens
+4. 工具调用            ✅ block-start×1 + tool-call-delta×4 + 完整调用
+                          name=get_weather  args={"city": "北京"}
+5. 不存在的模型         ✅ BAD_REQUEST
+6. 不支持图片的模型     ✅ UNSUPPORTED_CONTENT
+```
+
+
