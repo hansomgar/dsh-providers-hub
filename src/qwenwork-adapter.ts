@@ -70,6 +70,7 @@ import { registerAdapterIdempotent } from './llm-register-compat.js'
 import { isAbortLike } from './aggregate-adapter.js'
 import { reportLedgerAccount } from './token-ledger.js'
 import { retryAfterMsFromResponse } from './retry-after.js'
+import { buildQwenworkPayload } from './qwenwork-messages.js'
 import type { AccountPool } from './account-pool.js'
 import {
   QWENWORK_INTL,
@@ -478,20 +479,23 @@ export class QwenworkAdapter extends LlmAdapter {
     // ⚠️⚠️ **这一段是本家与 qiniu 的唯一实质差异**：先换 MaaS 票据。
     const ticket = await this.options.mintTicket(slot, options.signal)
 
-    const payload: Record<string, unknown> = {
+    // ⚠️⚠️ **必须走 `buildQwenworkPayload`，绝不内联拼 body**：
+    //    工具 + system 折叠 + max_tokens 守卫三件事都在那个函数里，
+    //    而 `tools` 漏包装会让**每一次带工具的请求**都 400
+    //    （2026-11-22 实测复现，见 qwenwork-messages.ts 模块头）。
+    const payload = buildQwenworkPayload({
       model: normalizeQwenworkModelId(options.model),
       messages,
-      stream: true,
-    }
-    if (options.system !== undefined && options.system.length > 0) payload.system = options.system
-    if (options.tools !== undefined) payload.tools = options.tools
-    if (options.temperature !== undefined) payload.temperature = options.temperature
-    // ⚠️ **单次输出上限必须下发**（本仓纪律：不能只用来过滤）。
-    if (options.maxTokens !== undefined) payload.max_completion_tokens = options.maxTokens
-    // ⚠️ 思考档位：上游实测 `reasoning_effort` 生效（high 时 reasoning_tokens=35）。
-    if (options.reasoningEffort !== undefined) {
-      payload.reasoning_effort = String(options.reasoningEffort)
-    }
+      ...options.system !== undefined && options.system.length > 0
+        ? { system: options.system }
+        : {},
+      ...options.tools !== undefined ? { tools: options.tools } : {},
+      ...options.temperature !== undefined ? { temperature: options.temperature } : {},
+      ...options.maxTokens !== undefined ? { maxTokens: options.maxTokens } : {},
+      ...options.reasoningEffort !== undefined
+        ? { reasoningEffort: String(options.reasoningEffort) }
+        : {},
+    })
 
     const url = `${ticket.baseUrl.replace(/\/+$/, '')}/v1/chat/completions`
     const response = await fetch(url, {
