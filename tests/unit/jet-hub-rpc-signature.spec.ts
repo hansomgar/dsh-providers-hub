@@ -107,6 +107,8 @@ describe('registerJetHubRpc：auths 是命名对象（类型层守卫）', () =>
       // ⚠️ **本 fork 独有**（七牛云，2026-10-29）：键同样是 provider id。
       //    漏掉会让本行报 TS2345 —— 正是本用例想守的不变式。
       qiniu: stub,
+      // ⚠️ 千问办公国际站（2026-11-22）。
+      qwenworkintl: stub,
       magicrew: stub,
       // ⚠️ **MagiCrew 国际版**（2026-11-01）：与 `magicrew` 是两个实例、两个
       //    provider id ⇒ `JetHubAuths` 各占一个键 —— 漏掉会让本行报 TS2345。
