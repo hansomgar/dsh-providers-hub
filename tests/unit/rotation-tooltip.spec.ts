@@ -231,3 +231,70 @@ describe('起点两条提示：互斥 + 降档只占一行', () => {
     expect(block, 'tooltip 必须说明「绕一圈后才再轮到它」').toContain('绕一圈后才再轮到它')
   })
 })
+
+/**
+ * ★★★ **升档文案的 from / to 方向**（2026-11-21 审计发现的真实缺陷）。
+ *
+ * ## 缺陷
+ *
+ * 上一版写成：
+ *
+ * ```js
+ * return `ℹ️ 起点现有「${from}」积分（原为「${to}」）⇒ 重新优先消耗它`;
+ * ```
+ *
+ * 而变量定义是：
+ *
+ * ```js
+ * const from = labelOf(selectionTier)   // 用户**选定**时的档位
+ * const to   = labelOf(nowTier)         // **现在**的档位
+ * ```
+ *
+ * ⇒ 「现在」应该是 `to`、「原来」应该是 `from`，**写反了**。
+ *
+ * 实测（选定=永久、现在=短期）：输出「现有「永久」（原为「短期」）」
+ * —— 与事实相反。
+ *
+ * ## 为什么原有用例抓不到
+ *
+ * 原用例只断言 `toContain('重新优先消耗它')`，**没有断言哪个档在前**
+ * ⇒ 方向反了也全绿。
+ *
+ * ## 判据：用真实调用，断言档位**位置**
+ *
+ * ⚠️ 必须行为级（真调函数），不能只做源码文本断言 ——
+ * 文本断言看不出 `from` / `to` 哪个是「现在」。
+ */
+describe('升档文案：现有档位 / 原档位的方向', () => {
+  it('★★★ 选定=永久、现在=短期 ⇒ 必须说「现有短期、原为永久」', async () => {
+    const mod = await import(join(process.cwd(), 'plugin-src', 'client', 'badge-model.js'))
+    const { rotationTierShiftHint } = mod as {
+      rotationTierShiftHint: (sel: string, cur: number) => string | null
+    }
+
+    // CREDIT_ORDER_TIER: imminent=0, expiring=1, permanent=2
+    const hint = rotationTierShiftHint('permanent', 1)
+    expect(hint, '必须有升档提示').not.toBeNull()
+
+    // ⚠️ 直接断言**顺序**：现在的档位必须在前，原档位必须在后
+    expect(hint, '★★★ 「现有」后面必须跟**现在的档位**（短期）')
+      .toMatch(/现有「短期」/)
+    expect(hint, '★★★ 「原为」后面必须跟**选定时的档位**（永久）')
+      .toMatch(/原为「永久」/)
+
+    // 反向：不得写反
+    expect(hint, '不得把 from/to 写反').not.toMatch(/现有「永久」/)
+  })
+
+  it('★★★ 选定=短期、现在=临期 ⇒ 必须说「现有临期、原为短期」', async () => {
+    const mod = await import(join(process.cwd(), 'plugin-src', 'client', 'badge-model.js'))
+    const { rotationTierShiftHint } = mod as {
+      rotationTierShiftHint: (sel: string, cur: number) => string | null
+    }
+
+    const hint = rotationTierShiftHint('expiring', 0)
+    expect(hint).not.toBeNull()
+    expect(hint, '现有档位必须是**现在**的临期').toMatch(/现有「临期」/)
+    expect(hint, '原档位必须是**选定**的短期').toMatch(/原为「短期」/)
+  })
+})
