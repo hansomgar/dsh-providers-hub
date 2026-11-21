@@ -31,23 +31,43 @@
  * 明禁「异常方式套取积分」。**本 provider 刻意不实现那套东西** ——
  * 国际站不需要，且那条路有封号风险。
  *
- * ## ⚠️⚠️ 三个池必须**分开呈现**，不得合并（这是本文件存在的全部理由）
+ * ## ⚠️⚠️ 额度是**瀑布**：先扣 daily，daily 用完扣 longterm
  *
- * 实测（同一账号，免费版）：
+ * ### 我先前的错误结论（2026-11-22 早，已推翻）
+ *
+ * 当时用**刚注册的新账号**实测，看到 `daily 200 / longterm 500`，
+ * 发一次请求后 `daily 200 → 199.8368` 而 `longterm 500` 纹丝不动 ⇒
+ * 我错误地得出「推理**只扣** daily，longterm 永远扣不到」，
+ * 并把 `total` 取成 `daily`。
+ *
+ * ### 真实规则（2026-11-22 晚，用 daily 已耗尽的账号实测）
+ *
  * ```json
- * { "daily_credits":    { "total_balance": 200 },   ← 推理**只扣**这个
+ * { "daily_credits":    { "total_balance": 0 },        ← 当天额度已用完
  *   "monthly_credits":  { "total_balance": 0 },
- *   "longterm_credits": { "total_balance": 500 } }  ← 注册赠送，推理**不扣**
+ *   "longterm_credits": { "total_balance": 378.0028 } } ← 仍在
  * ```
  *
- * 而 `quota.remaining` 是**三池合计 700**。推理前后的实测：
- * `daily 200 → 199.8368`，`longterm 500` **纹丝不动**。
+ * 此时**推理照样 200**，且扣的是 longterm：
+ * `longterm 378.0028 → 378.0011`（扣 0.0017），`daily` 纹丝不动。
  *
- * ⇒ 两条硬规则：
- * 1. 把 700 写成「每天 700」是**错的**（用户以为有 700 可用，实际 200 用完就 429）；
- * 2. 用合计判耗尽会**漏判**（daily 已空但合计还有 500 ⇒ 账号实际已不可用）。
+ * ⇒ 机制是**瀑布扣减**：daily 有就先扣 daily，daily 空了就扣 longterm。
+ * 先前「只扣 daily」的结论只在新账号（daily 未耗尽）这一段上成立，
+ * 是**观察窗口太窄**造成的误判。
  *
- * 故 `total` 取 **daily**，`longterm` 单独成一个包并标注「推理不消耗」。
+ * ### 由此纠正的两处实现
+ *
+ * 1. **`total` 必须是 daily + longterm 之和**（先前取 daily ⇒ 用户账户里
+ *    有 378 却显示 0 且报「查询失败」，这就是本次报障）；
+ * 2. **折算可用性看合计**（先前只看 daily ⇒ daily 为 0 的账号被判不可用，
+ *    而它其实完全能用）。
+ *
+ * ### ⚠️ 仍然成立的部分
+ *
+ * `monthly_credits` 是**订阅额度**（免费版恒 0），不属于可消耗池，
+ * **不计入** `total`。三个池的**到期时刻不同**（daily 次日 00:00、
+ * longterm 三个月后）⇒ 仍然**分成不同的包**呈现，不合并成一个数字，
+ * 否则用户看不出哪部分是每天刷新、哪部分是长期的。
  *
  * @module src/qwenwork-credits.ts
  */
@@ -121,8 +141,11 @@ export function buildQwenworkPackages(
     const isDaily = isQwenworkDailyWallet(wallet, now)
     const hasExpiry = typeof wallet.validTo === 'string' && Number.isFinite(Date.parse(wallet.validTo))
     const name = isDaily
-      ? `每日额度（推理消耗${index === 0 ? '' : ''}）`
-      : '注册赠送（推理不消耗）'
+      ? '每日额度（次日刷新）'
+      // ⚠️ **不能写「推理不消耗」**（2026-11-22 实测推翻）：daily 用完后
+      //    推理**就扣这个池**（实测 longterm 378.0028 → 378.0011）。
+      //    「注册赠送」是它的来源，「长期有效」是它的特征。
+      : '长期额度（注册赠送）'
     return {
       name,
       unit: '积分',
@@ -145,33 +168,48 @@ export function buildQwenworkPackages(
 /**
  * 把钱包快照转成 `CreditBalance`。
  *
- * ## ⚠️ `total` 取 **daily**，不是三池合计
+ * ## ⚠️⚠️ `total` = **daily + longterm**（可消耗池之和），不是只看 daily
  *
- * 见模块头：合计 700 里有 500 是推理吃不到的。把 700 当「今天可用」会让用户
- * 在 200 烧完后收到 `balance_insufficient` 却看到「还有 500」。
+ * 见模块头：额度是**瀑布扣减**（daily 用完扣 longterm）。
+ * 先前取 `daily` 的写法会把「daily 已耗尽但 longterm 还有 378」的账号
+ * 显示成 0 并判为查不到 —— 那正是 2026-11-22 的真实报障。
+ *
+ * ⚠️ **`monthly_credits` 不计入**：那是订阅额度（免费版恒 0），不属于
+ * 可消耗池。把它加进来会让「免费版用户」的余额虚高。
  *
  * @param snapshot 钱包快照。
  * @param now      当前时刻（毫秒；便于单测注入）。
- * @returns 读不到 daily 时返回 `undefined`（调用方按「查不到」呈现，**不得**当 0）。
+ * @returns 两个可消耗池都读不到时返回 `undefined`
+ *          （调用方按「查不到」呈现，**不得**当 0）。
  */
 export function buildQwenworkBalance(
   snapshot: QwenworkWalletsSnapshot,
   now: number = Date.now(),
 ): CreditBalance | undefined {
-  const daily = snapshot.daily
-  if (daily === undefined || !Number.isFinite(daily)) return undefined
+  const daily = readFinite(snapshot.daily)
+  const longterm = readFinite(snapshot.longterm)
+  // ⚠️ 两个池**都**读不到才算「查不到」。
+  //    任一读到就按它算 —— 只读到 longterm 是**正常状态**
+  //    （daily 当天用完之后就是这样）。
+  if (daily === undefined && longterm === undefined) return undefined
   const packages = buildQwenworkPackages(snapshot, now)
   const dailyWallet = snapshot.wallets.find((w) => isQwenworkDailyWallet(w, now))
   const expiresAt = dailyWallet?.validTo === undefined ? undefined : Date.parse(dailyWallet.validTo)
   return {
-    total: daily,
+    // ⚠️ 可消耗池之和（瀑布扣减 ⇒ 两个池都真的能用）。
+    total: (daily ?? 0) + (longterm ?? 0),
     packages: [...packages],
-    // ⚠️ 没有「已失效包」的概念（上游只回两个活跃钱包）⇒ 恒 0，不是查不到。
+    // ⚠️ 没有「已失效包」的概念（上游只回活跃钱包）⇒ 恒 0，不是查不到。
     expiredTotal: 0,
     ...expiresAt === undefined || !Number.isFinite(expiresAt)
       ? {}
       : { dailyGrantExpiresAt: expiresAt },
   }
+}
+
+/** 读一个有限数；`undefined` / `NaN` / `Infinity` 都当「没读到」。 */
+function readFinite(value: number | undefined): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined
 }
 
 /**
@@ -184,7 +222,8 @@ export function describeQwenworkCredits(snapshot: QwenworkWalletsSnapshot): stri
   const parts: string[] = []
   if (snapshot.daily !== undefined) parts.push(`每日 ${formatCredits(snapshot.daily)}`)
   if (snapshot.longterm !== undefined && snapshot.longterm > 0) {
-    parts.push(`注册赠送 ${formatCredits(snapshot.longterm)}（推理不消耗）`)
+    // ⚠️ **不能写「推理不消耗」**：daily 用完后推理就扣它（实测）。
+    parts.push(`长期 ${formatCredits(snapshot.longterm)}`)
   }
   if (parts.length === 0) return '读不到额度'
   return parts.join(' · ')
@@ -346,11 +385,28 @@ export async function qwenworkExpiry(params: {
   // ⚠️ 先试共享缓存；`null` / `undefined` 都表示「没有读数」⇒ 都必须回落自取。
   const cached = await params.cachedBalance?.()
   if (cached !== null && cached !== undefined) {
-    // 共享缓存的 `total` 已被 `buildQwenworkBalance` 约束成 **daily**，
-    // 故这里直接用 `total` 判可用性，不需要再区分池。
+    // ⚠️ 共享缓存的 `total` 已是**可消耗池之和**（daily + longterm），
+    //    故这里直接用 `total` 判可用性（见 buildQwenworkBalance 的注释）。
     if (!(cached.total > 0)) return UNUSABLE
     const now = params.now ?? Date.now()
-    const expiresAt = cached.dailyGrantExpiresAt
+    /**
+     * ⚠️ **到期时刻从 `packages` 里挑，而不是只看 `dailyGrantExpiresAt`**：
+     *
+     * - daily 有额 → 它的到期时刻（次日 00:00）就是可用终点；
+     * - daily 为 0、只有 longterm → 可用终点是 longterm 的到期（三个月后）。
+     *
+     * 若统一用 `dailyGrantExpiresAt`，第二类账号（daily 已耗尽）会被算成
+     * 「已过期」⇒ 聚合轮换里被剔除 —— 而它其实是最健康的那类账号
+     * （长期额度还剩几百）。
+     *
+     * ⚠️ 刻意**不给 `CreditBalance` 加字段**：那是全仓共享类型，
+     * 为一家 provider 加私有字段会污染公共接口（本仓红线）。
+     * 从 `packages`（每个包都带 `expiredTime`）里挑最晚的即可。
+     */
+    const dailyPositive = packagesHasDaily(cached)
+    const expiresAt = dailyPositive
+      ? cached.dailyGrantExpiresAt
+      : latestPackageExpiry(cached, now)
     // ⚠️ 无到期时刻**不编造** ⇒ 当长期（排最后但可当选）。
     if (expiresAt === undefined || !Number.isFinite(expiresAt)) return NEVER
     return expiresAt <= now ? UNUSABLE : expiresAt
@@ -358,14 +414,75 @@ export async function qwenworkExpiry(params: {
   if (params.fetchBalance === undefined) return UNUSABLE
   const snapshot = await params.fetchBalance(params.accessToken)
   if (snapshot === undefined) return UNUSABLE
-  const daily = snapshot.daily
-  // ⚠️ daily 读不到 ⇒ 保守剔除（见函数注释的取舍理由）。
-  if (daily === undefined || !Number.isFinite(daily)) return UNUSABLE
-  if (!(daily > 0)) return UNUSABLE
+  const daily = readFinite(snapshot.daily)
+  const longterm = readFinite(snapshot.longterm)
+  // ⚠️ **两个池都读不到**才算不可用。只读到 longterm 是正常状态
+  //    （daily 当天用完），此时账号完全能用。
+  if (daily === undefined && longterm === undefined) return UNUSABLE
+  if (!((daily ?? 0) + (longterm ?? 0) > 0)) return UNUSABLE
   const now = params.now ?? Date.now()
   const dailyWallet = snapshot.wallets.find((w) => isQwenworkDailyWallet(w, now))
-  const expiresAt = dailyWallet?.validTo === undefined ? Number.NaN : Date.parse(dailyWallet.validTo)
+  // ⚠️ daily 有额时用 daily 的到期（次日 00:00）；否则用最晚的那个钱包
+  //    （长期额度，三个月后）—— 见上面缓存放的同一段推导。
+  const expiresAtRaw = (daily ?? 0) > 0
+    ? dailyWallet?.validTo
+    : latestWalletValidTo(snapshot.wallets, now)
+  const expiresAt = expiresAtRaw === undefined ? Number.NaN : Date.parse(expiresAtRaw)
   // ⚠️ 无到期时刻**不编造** ⇒ 当长期。
   if (!Number.isFinite(expiresAt)) return NEVER
   return expiresAt <= now ? UNUSABLE : expiresAt
+}
+
+/**
+ * 取所有**未过期**钱包里最晚的那个 `valid_to`（daily 为 0 时用它当可用终点）。
+ *
+ * ⚠️ 取最晚而不是最早：longterm 才是那个账号真正的可用期；
+ * 取最早会得到已过期的 daily 钱包 ⇒ 误判整账号不可用。
+ */
+function latestWalletValidTo(
+  wallets: readonly { readonly validTo?: string }[],
+  now: number,
+): string | undefined {
+  let best: number | undefined
+  let bestRaw: string | undefined
+  for (const wallet of wallets) {
+    if (wallet.validTo === undefined) continue
+    const ms = Date.parse(wallet.validTo)
+    if (!Number.isFinite(ms) || ms <= now) continue
+    if (best === undefined || ms > best) {
+      best = ms
+      bestRaw = wallet.validTo
+    }
+  }
+  return bestRaw
+}
+
+/**
+ * 缓存读数里**是否还有 daily 额度**。
+ *
+ * ⚠️ 判据是「每日包还有剩余」而不是「`total > 0`」：
+ * `total` 现在已是两池之和，daily 耗尽时它仍为正。
+ *
+ * 每日包的识别沿用 `buildQwenworkPackages` 的命名约定（名称含「每日」）——
+ * 这是本模块内部约定，不跨模块。
+ */
+function packagesHasDaily(balance: CreditBalance): boolean {
+  for (const item of balance.packages) {
+    if (!item.name.includes('每日')) continue
+    if (item.remaining > 0) return true
+  }
+  return false
+}
+
+/** 缓存读数里所有未过期包里**最晚**的到期时刻（毫秒）。 */
+function latestPackageExpiry(balance: CreditBalance, now: number): number | undefined {
+  let best: number | undefined
+  for (const item of balance.packages) {
+    if (item.remaining <= 0) continue
+    if (item.expiredTime === undefined || item.expiredTime.length === 0) continue
+    const ms = Date.parse(item.expiredTime)
+    if (!Number.isFinite(ms) || ms <= now) continue
+    if (best === undefined || ms > best) best = ms
+  }
+  return best
 }

@@ -918,8 +918,8 @@ export const PROVIDER_REGISTRY: readonly ProviderDescriptor[] = Object.freeze([
   },
   {
     id: 'qwenworkintl',
-    label: 'QwenWork Intl (千问办公国际版)',
-    displayName: 'QwenWork Intl (千问办公国际版)',
+    label: 'QwenWork (国际版)',
+    displayName: 'QwenWork (国际版)',
     logoClass: 'qwenworkintl',
     // ⚠️⚠️ **`balance: true` 是实测结论（2026-11-22 真机）**，与 qiniu 相反。
     //

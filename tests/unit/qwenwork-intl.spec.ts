@@ -67,6 +67,7 @@ describe('产品配置', () => {
     expect(QWENWORK_INTL.redirectScheme).not.toBe('qwenwork-cn://')
   })
 
+  /**
    * ⚠️ **六个 query 字段一个不能多、一个不能少**（2026-11-22 实测）：
    * 任缺一个 ⇒ 400；任多一个（`response_type` / `scope` / `cosyVersion`）⇒ 同样 400。
    * 而那个报错是针对**整条 query** 的通用判据，指不出具体哪个字段错
@@ -280,24 +281,46 @@ describe('额度三池分离（本家最容易误导用户的一处）', () => {
   }
 
   /**
-   * ⚠️⚠️ **`total` 必须是 daily，不是三池合计 700**：
-   * 实测推理只扣 daily（`200 → 199.8368` 而 longterm 纹丝不动）⇒
-   * 把 700 当「今天可用」会让用户在 200 烧完后收到 `balance_insufficient`
-   * 却看到「还有 500」。
+   * ⚠️⚠️ **`total` = daily + longterm（可消耗池之和）**。
+   *
+   * ⚠️ 这条断言曾被改成「total 只取 daily」，依据是「新账号实测只扣 daily」。
+   * 2026-11-22 晚用 **daily 已耗尽的账号** 实测推翻了它：
+   * `daily=0 / longterm=378` 时推理照样 200，且扣的是 longterm
+   * （`378.0028 → 378.0011`）⇒ 机制是**瀑布扣减**，两个池都真能用。
+   *
+   * 取 daily 的旧写法会把这类账号显示成 0 并报「查询失败」
+   * —— 那正是用户的真实报障。
    */
-  it('★★ total 取 daily（不是合计 700）', () => {
+  it('★★ total = daily + longterm（瀑布扣减 ⇒ 两池都可用）', () => {
     const balance = buildQwenworkBalance(snapshot, now)
     expect(balance).toBeDefined()
-    expect(balance!.total).toBe(200)
-    expect(balance!.total).not.toBe(700)
+    expect(balance!.total).toBe(700)
+    // ⚠️ 反向：绝不能只取 daily。
+    expect(balance!.total).not.toBe(200)
   })
 
-  it('★ longterm 单独成包，且名字说明「推理不消耗」', () => {
+  /**
+   * ★★ **daily 耗尽但 longterm 还有钱** 是最关键的形态（用户当前账号就是）。
+   * 这时 total 必须等于 longterm，且**不得**返回 undefined（那会渲染成「查询失败」）。
+   */
+  it('★★ daily=0 且 longterm>0 ⇒ total=longterm，不是 undefined', () => {
+    const balance = buildQwenworkBalance({ daily: 0, longterm: 378.0028, wallets: [] }, now)
+    expect(balance, 'daily 用完不等于查不到').toBeDefined()
+    expect(balance!.total).toBe(378.0028)
+  })
+
+  /**
+   * ⚠️ 包名**不能写「推理不消耗」**：daily 用完后推理就扣它（实测）。
+   * 「注册赠送」是来源、「长期」是特征，写在一起就够。
+   */
+  it('★ longterm 单独成包，名字写作「长期额度（注册赠送）」', () => {
     const packages = buildQwenworkPackages(snapshot, now)
     expect(packages).toHaveLength(2)
     const longterm = packages.find((p) => p.name.includes('注册赠送'))
-    expect(longterm, '必须有一个包专门表示注册赠送').toBeDefined()
-    expect(longterm!.name).toContain('推理不消耗')
+    expect(longterm, '必须有一个包专门表示长期额度').toBeDefined()
+    expect(longterm!.name).toBe('长期额度（注册赠送）')
+    // ⚠️ 反向：绝不能声称「推理不消耗」（已被实测推翻）。
+    expect(longterm!.name).not.toContain('不消耗')
     expect(longterm!.remaining).toBe(500)
   })
 
@@ -331,8 +354,11 @@ describe('额度三池分离（本家最容易误导用户的一处）', () => {
   it('摘要把两个池分开写，绝不合成一个数', () => {
     const text = describeQwenworkCredits(snapshot)
     expect(text).toContain('每日 200')
-    expect(text).toContain('注册赠送 500')
-    expect(text).toContain('推理不消耗')
+    expect(text).toContain('长期 500')
+    // ⚠️ 反向：不能出现「推理不消耗」这种已被推翻的说法。
+    expect(text).not.toContain('不消耗')
+    // ⚠️ 也不能把两池合并成一个 700。
+    expect(text).not.toContain('700')
   })
 
   it('qwenworkDailyExhausted 三态：true / false / undefined（读不到不判死）', () => {
@@ -366,23 +392,52 @@ describe('额度折算原语 qwenworkExpiry', () => {
   })
 
   /**
-   * ⚠️⚠️ **注册赠送的 500 扣不动** ⇒ daily 为 0 时必须判 UNUSABLE，
-   * 哪怕合计还有 500。否则该账号被排进候选、每轮先 429 一次。
+   * ⚠️⚠️ **daily 为 0 但 longterm 还有钱 ⇒ 账号可用**（瀑布扣减）。
+   *
+   * ⚠️ 这条曾被写成「必须判 UNUSABLE」，依据是「新账号实测只扣 daily」。
+   * 2026-11-22 晚实测推翻：`daily=0 / longterm=378` 时推理 200 且扣 longterm。
+   * 判 UNUSABLE 会把**最健康的账号**（长期额度还剩几百）从聚合轮换里剔除。
    */
-  it('★★ daily 为 0 时判不可用（即使 longterm 还有 500）', async () => {
+  it('★★ daily=0 但 longterm>0 ⇒ 可用（瀑布扣减）', async () => {
     const at = await qwenworkExpiry({
       accessToken: 't',
       now,
-      fetchBalance: async () => ({ daily: 0, longterm: 500, wallets: [] }),
+      fetchBalance: async () => ({
+        daily: 0,
+        longterm: 378.0028,
+        wallets: [{ balance: 378.0028, validTo: '2027-02-22T01:21:29+08:00' }],
+      }),
+    })
+    // 应返回 longterm 的到期时刻（三个月后），不是 UNUSABLE。
+    expect(at).toBe(Date.parse('2027-02-22T01:21:29+08:00'))
+  })
+
+  /** ⚠️ 两池都是 0 才是真的不可用。 */
+  it('★ 两池都为 0 ⇒ 不可用', async () => {
+    const at = await qwenworkExpiry({
+      accessToken: 't',
+      now,
+      fetchBalance: async () => ({ daily: 0, longterm: 0, wallets: [] }),
     })
     expect(at).toBeLessThan(0) // UNUSABLE 是负数哨兵
   })
 
-  it('读不到 daily ⇒ 不可用（保守）', async () => {
+  /** ⚠️ 只读到 longterm 是正常状态（daily 当天用完）⇒ 必须可用。 */
+  it('★ 只有 longterm 读得到 ⇒ 可用（不判死）', async () => {
     const at = await qwenworkExpiry({
       accessToken: 't',
       now,
       fetchBalance: async () => ({ longterm: 500, wallets: [] }),
+    })
+    expect(at).toBeGreaterThan(0) // NEVER 是正无穷哨兵
+  })
+
+  /** ⚠️ 两池都读不到才判不可用。 */
+  it('★ 两池都读不到 ⇒ 不可用（保守）', async () => {
+    const at = await qwenworkExpiry({
+      accessToken: 't',
+      now,
+      fetchBalance: async () => ({ wallets: [] }),
     })
     expect(at).toBeLessThan(0)
   })
@@ -420,7 +475,8 @@ describe('额度折算原语 qwenworkExpiry', () => {
       now,
       cachedBalance: async () => ({
         total: 120,
-        packages: [],
+        // ⚠️ 有「每日」包且 remaining > 0 ⇒ 用 dailyGrantExpiresAt 当可用终点。
+        packages: [{ name: '每日额度（次日刷新）', remaining: 120 } as never],
         expiredTotal: 0,
         dailyGrantExpiresAt: Date.parse('2026-11-23T00:00:00+08:00'),
       }),
@@ -428,6 +484,30 @@ describe('额度折算原语 qwenworkExpiry', () => {
     })
     expect(fetchBalance).not.toHaveBeenCalled()
     expect(at).toBe(Date.parse('2026-11-23T00:00:00+08:00'))
+  })
+
+  /**
+   * ⚠️ **缓存里 daily 包为 0、只有长期包** ⇒ 必须用长期包的到期时刻，
+   * 而不是 daily 的（daily 那个已经过期了）。
+   */
+  it('★ 缓存里只有长期包 ⇒ 用长期包的到期时刻', async () => {
+    const fetchBalance = vi.fn(async () => ({ daily: 1, wallets: [] }))
+    const at = await qwenworkExpiry({
+      accessToken: 't',
+      now,
+      cachedBalance: async () => ({
+        total: 378,
+        packages: [
+          { name: '每日额度（次日刷新）', remaining: 0, expiredTime: '' } as never,
+          { name: '长期额度（注册赠送）', remaining: 378, expiredTime: '2027-02-22T01:21:29+08:00' } as never,
+        ],
+        expiredTotal: 0,
+        dailyGrantExpiresAt: Date.parse('2026-11-23T00:00:00+08:00'),
+      }),
+      fetchBalance,
+    })
+    expect(fetchBalance).not.toHaveBeenCalled()
+    expect(at, '必须用长期包的到期，不是已过期的 daily').toBe(Date.parse('2027-02-22T01:21:29+08:00'))
   })
 
   it('中止错误必须原样上抛（不得折成 UNUSABLE）', async () => {
@@ -476,7 +556,7 @@ describe('fetchQwenworkBalanceDetailed：失败原因必须可区分', () => {
     expect(result.balance?.total).toBe(0)
   })
 
-  it('正常响应装配出 total = daily', async () => {
+  it('正常响应装配出 total = daily + longterm', async () => {
     const body = JSON.stringify({
       data: {
         daily_credits: { total_balance: 199.8368 },
@@ -490,7 +570,8 @@ describe('fetchQwenworkBalanceDetailed：失败原因必须可区分', () => {
     })
     const fetchImpl = vi.fn(async () => new Response(body, { status: 200 })) as unknown as typeof fetch
     const result = await fetchQwenworkBalanceDetailed(cred, QWENWORK_INTL, fetchImpl)
-    expect(result.balance?.total).toBe(199.8368)
+    // ⚠️ 199.8368（daily）+ 500（longterm）= 699.8368
+    expect(result.balance?.total).toBe(699.8368)
     expect(result.balance?.packages).toHaveLength(2)
   })
 

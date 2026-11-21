@@ -161,7 +161,7 @@ export interface QwenworkProduct {
 export const QWENWORK_INTL: QwenworkProduct = {
   id: 'qwenworkintl',
   // ⚠️ 与客户端 PROVIDERS 的 label 逐字一致。
-  displayName: 'QwenWork Intl (千问办公国际版)',
+  displayName: 'QwenWork (国际版)',
   webBase: 'https://qwenwork.ai',
   gatewayBase: 'https://gateway.qwenwork.ai',
   fallbackInferBase: 'https://api1.qwenwork.ai',
