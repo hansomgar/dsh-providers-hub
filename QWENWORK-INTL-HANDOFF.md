@@ -23,7 +23,7 @@
 |---|---|
 | 分支 | **`feat/qwenwork-intl-provider`** |
 | provider id | **`qwenworkintl`**（`/^[a-z]+$/` 硬约束，不能带连字符） |
-| 展示名 | `QwenWork Intl (千问办公国际版)` |
+| 展示名 | `QwenWork (国际版)` |
 | 推送目标 | **`fork`** = `hansomgar/dsh-providers-hub` |
 | 上游 | `origin` = `iJetLi/dsh-providers-hub`（**只读**） |
 
@@ -295,22 +295,40 @@ tests/unit/qwenwork-login.spec.ts   29 条（逐条锁死上面三个坑）
 主回复 + 标题 + 压缩三条请求 ⇒ 没有单飞表就会换三次票。
 实现在 `QwenworkIntlAuth.mintTicket`（按 slot id 缓存 + inflight Map，**提前 60 秒**失效）。
 
-### 4.5 ⚠️⚠️ 三个额度池，只有 daily 会被消耗
+### 4.5 ⚠️⚠️ 额度是**瀑布扣减**，`total` 取两池之和
 
-```json
-GET https://qwenwork.ai/user/wallets
-{"daily_credits":{total_balance:200},      ← 推理**只扣**这个
- "longterm_credits":{total_balance:500},   ← 注册赠送，推理**扣不动**
- "active_wallets":{wallets:[…]}}
+```
+推理前  daily=0   longterm=378.0028
+推理后  daily=0   longterm=378.0011   ← 扣 0.0017，daily 纹丝不动
+HTTP 200 ✅
 ```
 
-实测推理前后：`daily 200 → 199.8368`，`longterm 500` **纹丝不动**。
+⇒ **先扣 daily，daily 空了扣 longterm**。
 
-⇒ **两条硬规则**：
-1. 面板「余额」取 **daily**，不是合计 700 —— 否则用户在 200 烧完后收到
-   `balance_insufficient` 却看到「还有 500」；
-2. 折算可用性**只看 daily** —— 用合计会漏判（daily 已空但合计还有 500 ⇒
-   账号实际不可用却仍被排进聚合候选 ⇒ **每轮先 429 一次**）。
+#### ⚠️⚠️ 这里有一个我踩过并纠正过的坑（别重犯）
+
+**2026-11-22 早**，我用**刚注册的新账号**实测：`daily 200 / longterm 500`，
+发一次请求后 `daily 200 → 199.8368` 而 `longterm 500` 纹丝不动
+⇒ 错误地得出「推理**只扣** daily，longterm 永远扣不到」，把 `total` 取成了 `daily`。
+
+**同一天晚**，用 daily 已耗尽的账号实测推翻了它 —— 用户随即报障
+「登录成功但积分显示 0 且查询失败，实际有 378」。
+
+**教训**：那次观察窗口太窄（只测了新账号 daily 未耗尽的那一段）。
+判定扣费口径时，**必须覆盖两个状态**：daily 有额、daily 已耗尽。
+
+#### 现在的实现
+
+- `buildQwenworkBalance` 的 `total` = **daily + longterm**
+  （`monthly_credits` 不计入 —— 那是订阅额度，免费版恒 0）
+- `qwenworkExpiry` 看**两池之和**（旧写法只看 daily ⇒ 把长期额度还剩几百的
+  **最健康账号**从聚合轮换里剔除）
+- 到期时刻：daily 有额用 daily 的（次日 00:00），否则用**最晚**那个钱包
+  （长期额度，三个月后）
+  ⚠️ 刻意**不给 `CreditBalance` 加字段**（全仓共享类型，不该为一家加私有字段），
+  改为从 `packages` 里挑
+- 包名：`每日额度（次日刷新）` / `长期额度（注册赠送）`
+  ⚠️ **不得写「推理不消耗」**（已被实测推翻）
 
 ### 4.6 ⚠️ 鉴权是 Bearer，**cookie 一律 401**
 
@@ -396,7 +414,7 @@ GET https://qwenwork.ai/user/wallets
 dsh plugin --profile desktop add "file:E:\Data\data_dsh\2026\dsh-agent-proxy\dsh-providers-hub"
 ```
 
-装完重启 DSH，模型选择器里出现「**QwenWork Intl (千问办公国际版)**」分组，9 个模型。
+装完重启 DSH，模型选择器里出现「**QwenWork (国际版)**」分组，9 个模型。
 
 ⚠️ **首次使用必须在面板里登录**（设备码授权），且**必须用正常邮箱注册的账号**。
 
@@ -406,6 +424,7 @@ dsh plugin --profile desktop add "file:E:\Data\data_dsh\2026\dsh-agent-proxy\dsh
 
 | # | 事项 | 状态 |
 |---|---|---|
+| 0 | ~~积分显示 0 / 查询失败~~ | ✅ **已修**（2026-11-22，commit 784e1d01）：根因是 	otal 只取 daily，而额度是**瀑布扣减** ⇒ 改为两池之和。真实凭据实测 378.0011 正确 |
 | 1 | **「每日 200 是否真补满」** | ⚠️ 只有结构证据（`valid_to` = 次日 00:00，注册当天 200 已到账）。已挂定时任务 **2026-11-23 00:30** 自动核对 |
 | 2 | 全量测试 8 条红 | 全部是**改动前基线就有的**（`qoder-web-usage`×4、`balance-disk-cache`×2 flaky、`raccoon-authorize`×1、`autoclawintl-zai`×1）。已用 `git stash` 在基线上复现 |
 | 3 | `autoclaw` 端口缺陷 | 修复在 `fix/baseline-test-failures` 的 `83b54059`，**未并入本分支**（刻意保持基于干净上游）|
