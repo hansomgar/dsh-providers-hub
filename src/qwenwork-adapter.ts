@@ -76,6 +76,7 @@ import {
   QWENWORK_INTL,
   QWENWORK_INTL_FALLBACK_MODELS,
   classifyQwenworkError,
+  displayNameOfQwenworkModel,
   parseQwenworkChatModes,
   type QwenworkErrorInfo,
   type QwenworkFallbackModel,
@@ -88,10 +89,19 @@ import {
   type QwenworkCredential,
 } from './qwenwork.js'
 
-/** 目录条目（本家形状；远端不可用，实际全部来自兜底表）。 */
+/**
+ * 目录条目（本家形状）。
+ *
+ * ⚠️ 现由**远端 `/api/chat-modes`** 填充（10 分钟缓存），远端不可用时才回退兜底表。
+ */
 export interface QwenworkCatalogEntry {
   id: string
+  /** 展示名（**不含倍率** —— 倍率由 `toCatalogEntry` 拼上去）。 */
   name: string
+  /** 计费倍率（上游 `price_factor`），拼进展示名用。 */
+  priceFactor?: number
+  /** 模型图标 URL（上游 `icon`）。 */
+  icon?: string
   contextWindow: number
   supportsImage: boolean
   efforts?: readonly string[]
@@ -201,7 +211,15 @@ export function qwenworkRetryAfterMs(
 function toCatalogEntry(m: QwenworkCatalogEntry): CatalogEntry {
   return {
     id: m.id,
-    name: m.name,
+    /**
+     * ⚠️ **倍率拼进 `name`**（`模型名 · x倍率`）：
+     * composer 的模型菜单**只渲染 `name`**，写进 description 等于没写。
+     * 本家倍率跨度 0.1 ~ 2.6（26 倍）是选型时最重要的信号。
+     * 做法与 `accio-adapter.ts` 的 `displayNameOfAccioModel` 同款。
+     */
+    name: displayNameOfQwenworkModel(m),
+    // ⚠️ 图标：远端 `icon` 优先，兜底表也写了那批 URL。
+    ...m.icon === undefined ? {} : { icon: m.icon },
     // ⚠️ 能力表缺失/未知时**一律回退 `['text']`**（硬约定：声明支持就必须真支持）。
     inputModalities: m.supportsImage
       ? (['text', 'image'] as const)
@@ -230,6 +248,8 @@ function fallbackEntries(): readonly QwenworkCatalogEntry[] {
   return QWENWORK_INTL_FALLBACK_MODELS.map((m) => ({
     id: m.id,
     name: m.name,
+    ...m.priceFactor === undefined ? {} : { priceFactor: m.priceFactor },
+    ...m.icon === undefined ? {} : { icon: m.icon },
     contextWindow: m.contextWindow,
     supportsImage: m.supportsImage,
     ...m.efforts === undefined ? {} : { efforts: m.efforts },

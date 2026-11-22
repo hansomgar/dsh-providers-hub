@@ -16,7 +16,9 @@ import {
   QWENWORK_INTL,
   QWENWORK_INTL_FALLBACK_MODELS,
   classifyQwenworkError,
+  displayNameOfQwenworkModel,
   isKnownQwenworkModel,
+  parseQwenworkChatModes,
 } from '../../src/qwenwork-product.js'
 import {
   decodeQwenworkJwt,
@@ -125,25 +127,100 @@ describe('产品配置', () => {
    * 整表一律 true 会让用户看到「支持图片」而实际每次必失败。
    */
   /**
-   * ★ **`supportsImage` 必须等于上游的 `is_vl`**（那是权威声明，不是我猜的）。
+   * ★★★ **图片能力用实测覆盖上游 `is_vl`**（2026-11-22 真机，用户质疑后复测）。
    *
-   * ⚠️ 先前的错：把 `pro` 标成 `false`（上游是 `true`）。
-   * 根因是我早期用「发一条带图请求看会不会 400」来判，
-   * 而 `pro` 那次 400 的**真实原因不是图片**（是另一处参数问题）。
-   * ⇒ **有权威声明时就不要用自己的探测结论覆盖它**。
+   * ## 上游这个字段**两个方向都错过**
+   *
+   * | 模型 | 上游 `is_vl` | 实测（发 64×64 纯红 PNG 问颜色）| 采用 |
+   * |---|---|---|---|
+   * | `deepseek-flash` | **false** | ✅ 正确回答「红色」| **true** |
+   * | `pro` | **true** | ❌ 4 种格式全失败（两种 400、两种 500）| **false** |
+   * | `advanced` / `glm-5.3` | false | ❌ 400 | false（与上游一致）|
+   *
+   * ⇒ 只用 `is_vl` 会让 `pro` 每次带图都 400（用户以为能用，更糟），
+   * 而 `deepseek-flash` 明明能看图却被挡住。
    */
-  it('★★ supportsImage 等于上游 is_vl（不收图的是 advanced / deepseek-flash / glm-5.3）', () => {
+  it('★★★ 图片能力：实测覆盖优先（deepseek-flash 能看、pro 不能）', () => {
     const byId = new Map(QWENWORK_INTL_FALLBACK_MODELS.map((m) => [m.id, m]))
-    // 上游 is_vl: false 的三个
-    for (const id of ['advanced', 'deepseek-flash', 'glm-5.3']) {
-      expect(byId.get(id)?.supportsImage, `${id} 上游 is_vl=false`).toBe(false)
+    // ⚠️ 上游说 false，实测能看图 ⇒ 必须是 true（用户报障的就是这条）。
+    expect(byId.get('deepseek-flash')?.supportsImage, 'deepseek-flash 实测能看图').toBe(true)
+    // ⚠️ 上游说 true，实测 400/500 ⇒ 必须是 false（否则每次都失败）。
+    expect(byId.get('pro')?.supportsImage, 'pro 实测不收图').toBe(false)
+    // 与上游一致的两个。
+    expect(byId.get('advanced')?.supportsImage).toBe(false)
+    expect(byId.get('glm-5.3')?.supportsImage).toBe(false)
+    // 其余仍为 true。
+    for (const id of ['flash', 'qwen4-max', 'qwen3.8-max', 'qwen3.8-flash', 'glm-5.3-flash', 'kimi-k3.1-pro', 'minimax-m3.1-flash']) {
+      expect(byId.get(id)?.supportsImage, id + ' 实测/上游均为 true').toBe(true)
     }
-    // 其余都是 is_vl: true
-    for (const id of ['flash', 'pro', 'qwen4-max', 'qwen3.8-max', 'qwen3.8-flash', 'glm-5.3-flash', 'kimi-k3.1-pro', 'minimax-m3.1-flash']) {
-      expect(byId.get(id)?.supportsImage, `${id} 上游 is_vl=true`).toBe(true)
+  })
+
+  /**
+   * ★★ **覆盖表必须真的被 `parseQwenworkChatModes` 应用**。
+   *
+   * 只断言兜底表不够 —— 真实运行走的是**远端解析**那条路。
+   * 这条用一份「上游说 pro=true、deepseek-flash=false」的假响应，
+   * 断言解析结果与覆盖表一致。
+   */
+  it('★★ 解析远端时也应用覆盖（不信上游的 is_vl）', () => {
+    const body = {
+      qwork: [
+        { key: 'deepseek-flash', is_vl: false, max_input_tokens: 1000000, enable: true, price_factor: 0.2, i18n: { display_name: { zh: 'DeepSeek' } } },
+        { key: 'pro', is_vl: true, max_input_tokens: 1000000, enable: true, price_factor: 1, i18n: { display_name: { zh: '旗舰' } } },
+        // 不在覆盖表里的，才信上游。
+        { key: 'flash', is_vl: true, max_input_tokens: 1000000, enable: true, price_factor: 0.1, i18n: { display_name: { zh: '标准' } } },
+        { key: 'zzz-unknown', is_vl: false, max_input_tokens: 1000000, enable: true, price_factor: 9, i18n: { display_name: { zh: 'X' } } },
+      ],
     }
-    // ⚠️ 反向：pro 必须收图（旧表错标成 false）。
-    expect(byId.get('pro')?.supportsImage).not.toBe(false)
+    const parsed = parseQwenworkChatModes(body)
+    const byId = new Map(parsed.map((m) => [m.id, m]))
+    expect(byId.get('deepseek-flash')?.supportsImage, '覆盖表说 true').toBe(true)
+    expect(byId.get('pro')?.supportsImage, '覆盖表说 false').toBe(false)
+    expect(byId.get('flash')?.supportsImage, '不在覆盖表 ⇒ 信上游 true').toBe(true)
+    expect(byId.get('zzz-unknown')?.supportsImage, '不在覆盖表 ⇒ 信上游 false').toBe(false)
+  })
+
+  it('★★ 解析远端时带上倍率与图标', () => {
+    const body = {
+      qwork: [{
+        key: 'glm-5.3',
+        is_vl: false,
+        max_input_tokens: 1000000,
+        enable: true,
+        price_factor: 1.3,
+        icon: 'https://img.example/x.svg',
+        i18n: { display_name: { zh: 'GLM-5.3' } },
+      }],
+    }
+    const m = parseQwenworkChatModes(body)[0]
+    expect(m?.priceFactor).toBe(1.3)
+    expect(m?.icon).toBe('https://img.example/x.svg')
+  })
+
+  it('★★ 倍率缺失时不编造（priceFactor 不上、展示名也不拼）', () => {
+    const body = {
+      qwork: [{
+        key: 'no-price',
+        is_vl: true,
+        max_input_tokens: 1000000,
+        enable: true,
+        i18n: { display_name: { zh: '无价' } },
+      }],
+    }
+    const m = parseQwenworkChatModes(body)[0]
+    expect(m?.priceFactor).toBeUndefined()
+    expect(displayNameOfQwenworkModel({ name: '无价' })).toBe('无价')
+  })
+
+  it('★★ 展示名把倍率拼进 name（composer 只渲染 name）', () => {
+    expect(displayNameOfQwenworkModel({ name: '标准', priceFactor: 0.1 })).toBe('标准 · x0.1')
+    // ⚠️ 倍率 1 照拼（1 不是「无」）。
+    expect(displayNameOfQwenworkModel({ name: '高级', priceFactor: 1 })).toBe('高级 · x1')
+    // ⚠️ 倍率 0 照拼（免费是合法倍率）。
+    expect(displayNameOfQwenworkModel({ name: '免费', priceFactor: 0 })).toBe('免费 · x0')
+    // ⚠️ 非有限值不拼。
+    expect(displayNameOfQwenworkModel({ name: '坏值', priceFactor: Number.NaN })).toBe('坏值')
+    expect(displayNameOfQwenworkModel({ name: '无穷', priceFactor: Number.POSITIVE_INFINITY })).toBe('无穷')
   })
 
   /**

@@ -214,8 +214,23 @@ export const QWENWORK_INTL: QwenworkProduct = {
 export interface QwenworkFallbackModel {
   /** 上游真实模型 id（**实测 200 的那个名字**，见模块头的对照表）。 */
   id: string
-  /** 展示名。 */
+  /** 展示名（**不含倍率**；倍率由 `displayNameOfQwenworkModel` 拼上去）。 */
   name: string
+  /**
+   * **计费倍率**（上游 `price_factor`，远端下发）。
+   *
+   * ⚠️ 这是用户选型时最重要的信号（本家跨度 0.1 ~ 2.6，26 倍）⇒
+   * 必须进**展示名**（composer 的模型菜单只渲染 `name`，写进 description 等于没写）。
+   * 见 `displayNameOfQwenworkModel` 的三条边界。
+   */
+  priceFactor?: number
+  /**
+   * 模型图标 URL（上游 `icon`，`img.alicdn.com` 的 24×24 SVG）。
+   *
+   * ⚠️ 远端下发就用远端；兜底表里也写了实测那批 URL
+   * （离线时图标仍能显示，代价是上游换 CDN 时会 404 —— 但那时模型表也该更新了）。
+   */
+  icon?: string
   /**
    * 上下文窗口。
    *
@@ -223,7 +238,19 @@ export interface QwenworkFallbackModel {
    * `resolveModel` 判 `> 0` 才下发 `context`。
    */
   contextWindow: number
-  /** 是否支持图片输入（**逐模型实测**，见模块头的图片矩阵）。 */
+  /**
+   * 是否支持图片输入。
+   *
+   * ⚠️⚠️ **不用上游的 `is_vl`，用实测覆盖**（2026-11-22 真机）：
+   *
+   * | 模型 | 上游 `is_vl` | 实测 | 采用 |
+   * |---|---|---|---|
+   * | `deepseek-flash` | **false** | ✅ 能看图（回答「红色」正确）| **true** |
+   * | `pro` | **true** | ❌ 4 种图片格式全失败（400/500）| **false** |
+   * | `advanced` / `glm-5.3` | false | ❌ 400 | false（与上游一致）|
+   *
+   * ⇒ 上游这个字段**两个方向都错过**，故用 `QWENWORK_IMAGE_OVERRIDES` 覆盖。
+   */
   supportsImage: boolean
   /**
    * 支持的思考档位（上游 wire 值，**强度序弱 → 强**）。
@@ -255,8 +282,92 @@ export interface QwenworkFallbackModel {
   efforts?: readonly string[]
 }
 
+/** 思考档位（四档实测生效，见 `QwenworkFallbackModel.efforts` 的文档）。 */
+export const QWENWORK_INTL_EFFORTS: readonly string[] = ['low', 'medium', 'high', 'max']
+
 /**
- * 兜底模型表（**2026-11-22 按上游真实目录校准**）。
+ * **图片能力的实测覆盖表**（键是模型 id，值是**实测**结果）。
+ *
+ * ## ⚠️⚠️ 为什么必须覆盖上游的 `is_vl`
+ *
+ * 2026-11-22 真机实测（发一张 64×64 纯红 PNG，问「什么颜色」）：
+ *
+ * | 模型 | 上游 `is_vl` | 实测 | 结论 |
+ * |---|---|---|---|
+ * | `deepseek-flash` | **false** | ✅ 正确回答「红色」 | **上游漏报** |
+ * | `pro` | **true** | ❌ 4 种格式全失败（两种 400、两种 500） | **上游误报** |
+ * | `advanced` | false | ❌ 400 | 上游正确 |
+ * | `glm-5.3` | false | ❌ 400 | 上游正确 |
+ *
+ * ⇒ 上游这个字段**两个方向都错过** ⇒ 只用它会让：
+ * - `deepseek-flash` 明明能看图却被挡住（用户报障）；
+ * - `pro` 被放行、每次带图请求都 400（更糟，因为用户以为能用）。
+ *
+ * ## 判据优先级
+ *
+ * **本表 > 上游 `is_vl`**。表里没有的模型才信上游。
+ *
+ * ⚠️ 本表是**已知腐坏点**：上游修好 `is_vl` 后这里会变成多余覆盖。
+ * 保留的理由是「宁可挡住也不让模型对着图片编答案」（本仓纪律），
+ * 而实测过的事实比上游声明更可信。
+ */
+export const QWENWORK_IMAGE_OVERRIDES: Readonly<Record<string, boolean>> = {
+  // 上游说 false，实测能看图。
+  'deepseek-flash': true,
+  // 上游说 true，实测四种格式全 400/500。
+  pro: false,
+}
+
+/**
+ * 模型图标（上游 `icon`，`img.alicdn.com` 的 24×24 SVG）。
+ *
+ * ⚠️ 同一家的多个模型会共用同一个图标（如 `qwen4-max` 与 `qwen3.8-flash`
+ * 都是 `O1CN01ETorFq…`）—— 这是上游的选择，不要"帮忙"去重或替换。
+ */
+export const QWENWORK_MODEL_ICONS: Readonly<Record<string, string>> = {
+  flash: 'https://img.alicdn.com/imgextra/i3/O1CN01fdkM1z1wLnCvXab0P_!!6000000006292-55-tps-24-24.svg',
+  advanced: 'https://img.alicdn.com/imgextra/i4/O1CN011jr9dw1yjGjzWTNcC_!!6000000006614-55-tps-24-24.svg',
+  pro: 'https://img.alicdn.com/imgextra/i1/O1CN01nxyv9P22Xb6vI9EzN_!!6000000007130-55-tps-24-24.svg',
+  'qwen4-max': 'https://img.alicdn.com/imgextra/i1/O1CN01ETorFq1Erzz12eLpB_!!6000000000406-55-tps-24-24.svg',
+  'qwen3.8-max': 'https://img.alicdn.com/imgextra/i4/O1CN01qh4CF31oPtpub82mX_!!6000000005218-55-tps-24-24.svg',
+  'qwen3.8-flash': 'https://img.alicdn.com/imgextra/i1/O1CN01ETorFq1Erzz12eLpB_!!6000000000406-55-tps-24-24.svg',
+  'deepseek-flash': 'https://img.alicdn.com/imgextra/i2/O1CN019S68mo1FVqR91dYiI_!!6000000000493-55-tps-24-24.svg',
+  'glm-5.3': 'https://img.alicdn.com/imgextra/i3/O1CN01HmBvRv25HW4O4Sget_!!6000000007501-55-tps-24-24.svg',
+  'glm-5.3-flash': 'https://img.alicdn.com/imgextra/i3/O1CN01HmBvRv25HW4O4Sget_!!6000000007501-55-tps-24-24.svg',
+  'kimi-k3.1-pro': 'https://img.alicdn.com/imgextra/i1/O1CN01x8KTvF1Y8SvCpsydZ_!!6000000003014-55-tps-24-24.svg',
+  'minimax-m3.1-flash': 'https://img.alicdn.com/imgextra/i4/O1CN01wOyXbC1zDUtqa29XZ_!!6000000006680-55-tps-24-24.svg',
+}
+
+/**
+ * 把模型名与**计费倍率**拼成展示名：`名字 · x倍率`。
+ *
+ * ## ⚠️ 为什么倍率必须进 `name`（不是 `description`）
+ *
+ * composer 的模型切换菜单**只渲染 `name`**（`description` 完全不读）——
+ * 倍率写进 description 等于没写。本家倍率跨度 0.1 ~ 2.6（**26 倍**），
+ * 是用户选型时最重要的信号。（与 `accio-adapter.ts` 的 `displayNameOfAccioModel`
+ * 同款做法、同款理由。）
+ *
+ * ## 三条边界（照 accio 的规则）
+ *
+ * - **倍率 1 照拼**（`1` 不是「无」）；
+ * - **倍率 0 照拼**（免费是**合法**倍率，与「没有倍率信息」语义不同，
+ *   故判据必须是 `!== undefined` 而不是真值判断）；
+ * - **非有限值不拼**（不产出 `xNaN` / `xInfinity`）。
+ *
+ * 安全性：`name` 纯属展示 —— DSH 的选择与持久化只用 `id`。
+ */
+export function displayNameOfQwenworkModel(model: {
+  readonly name: string
+  readonly priceFactor?: number
+}): string {
+  const factor = model.priceFactor
+  if (factor === undefined || !Number.isFinite(factor)) return model.name
+  return `${model.name} · x${factor}`
+}
+
+/**
+ * 兜底模型表（**2026-11-22 按上游真实目录 + 实测校准**）。
  *
  * ## ⚠️⚠️ 「国际站拿不到目录端点」是**错的**（2026-11-22 浏览器实测推翻）
  *
@@ -321,17 +432,17 @@ export const QWENWORK_INTL_FALLBACK_MODELS: readonly QwenworkFallbackModel[] = [
   // OpenAI 兼容（`POST /v1/chat/completions`）。⚠️ 实测它们**仍能**用 OpenAI
   // 兼容端点调通（网关做了转换），故仍列在本表里；若将来上游改成严格分流，
   // 需要为这两个单独接 Anthropic 协议。
-  { id: 'flash', name: '标准', contextWindow: 1_000_000, supportsImage: true, efforts: ['low', 'medium', 'high', 'max'] },
-  { id: 'advanced', name: '高级', contextWindow: 1_000_000, supportsImage: false, efforts: ['low', 'medium', 'high', 'max'] },
-  { id: 'pro', name: '旗舰', contextWindow: 1_000_000, supportsImage: true, efforts: ['low', 'medium', 'high', 'max'] },
-  { id: 'qwen4-max', name: 'Qwen4-Max', contextWindow: 1_000_000, supportsImage: true, efforts: ['low', 'medium', 'high', 'max'] },
-  { id: 'qwen3.8-max', name: 'Qwen3.8-Max', contextWindow: 1_000_000, supportsImage: true, efforts: ['low', 'medium', 'high', 'max'] },
-  { id: 'qwen3.8-flash', name: 'Qwen3.8-Flash', contextWindow: 1_000_000, supportsImage: true, efforts: ['low', 'medium', 'high', 'max'] },
-  { id: 'deepseek-flash', name: 'DeepSeek-V4.1-Flash', contextWindow: 1_000_000, supportsImage: false, efforts: ['low', 'medium', 'high', 'max'] },
-  { id: 'glm-5.3', name: 'GLM-5.3', contextWindow: 1_000_000, supportsImage: false, efforts: ['low', 'medium', 'high', 'max'] },
-  { id: 'glm-5.3-flash', name: 'GLM-5.3-Flash', contextWindow: 1_000_000, supportsImage: true, efforts: ['low', 'medium', 'high', 'max'] },
-  { id: 'kimi-k3.1-pro', name: 'Kimi-K3.1-Pro', contextWindow: 1_000_000, supportsImage: true, efforts: ['low', 'medium', 'high', 'max'] },
-  { id: 'minimax-m3.1-flash', name: 'MiniMax-M3.1-Flash', contextWindow: 1_000_000, supportsImage: true, efforts: ['low', 'medium', 'high', 'max'] },
+  { id: 'flash', name: '标准', priceFactor: 0.1, icon: QWENWORK_MODEL_ICONS['flash'], contextWindow: 1_000_000, supportsImage: true, efforts: QWENWORK_INTL_EFFORTS },
+  { id: 'advanced', name: '高级', priceFactor: 1, icon: QWENWORK_MODEL_ICONS['advanced'], contextWindow: 1_000_000, supportsImage: false, efforts: QWENWORK_INTL_EFFORTS },
+  { id: 'pro', name: '旗舰', priceFactor: 1, icon: QWENWORK_MODEL_ICONS['pro'], contextWindow: 1_000_000, supportsImage: false, efforts: QWENWORK_INTL_EFFORTS },
+  { id: 'qwen4-max', name: 'Qwen4-Max', priceFactor: 1.4, icon: QWENWORK_MODEL_ICONS['qwen4-max'], contextWindow: 1_000_000, supportsImage: true, efforts: QWENWORK_INTL_EFFORTS },
+  { id: 'qwen3.8-max', name: 'Qwen3.8-Max', priceFactor: 1.9, icon: QWENWORK_MODEL_ICONS['qwen3.8-max'], contextWindow: 1_000_000, supportsImage: true, efforts: QWENWORK_INTL_EFFORTS },
+  { id: 'qwen3.8-flash', name: 'Qwen3.8-Flash', priceFactor: 0.1, icon: QWENWORK_MODEL_ICONS['qwen3.8-flash'], contextWindow: 1_000_000, supportsImage: true, efforts: QWENWORK_INTL_EFFORTS },
+  { id: 'deepseek-flash', name: 'DeepSeek-V4.1-Flash', priceFactor: 0.2, icon: QWENWORK_MODEL_ICONS['deepseek-flash'], contextWindow: 1_000_000, supportsImage: true, efforts: QWENWORK_INTL_EFFORTS },
+  { id: 'glm-5.3', name: 'GLM-5.3', priceFactor: 1.3, icon: QWENWORK_MODEL_ICONS['glm-5.3'], contextWindow: 1_000_000, supportsImage: false, efforts: QWENWORK_INTL_EFFORTS },
+  { id: 'glm-5.3-flash', name: 'GLM-5.3-Flash', priceFactor: 0.2, icon: QWENWORK_MODEL_ICONS['glm-5.3-flash'], contextWindow: 1_000_000, supportsImage: true, efforts: QWENWORK_INTL_EFFORTS },
+  { id: 'kimi-k3.1-pro', name: 'Kimi-K3.1-Pro', priceFactor: 2.6, icon: QWENWORK_MODEL_ICONS['kimi-k3.1-pro'], contextWindow: 1_000_000, supportsImage: true, efforts: QWENWORK_INTL_EFFORTS },
+  { id: 'minimax-m3.1-flash', name: 'MiniMax-M3.1-Flash', priceFactor: 0.2, icon: QWENWORK_MODEL_ICONS['minimax-m3.1-flash'], contextWindow: 1_000_000, supportsImage: true, efforts: QWENWORK_INTL_EFFORTS },
 ]
 
 /**
@@ -367,13 +478,42 @@ export function parseQwenworkChatModes(
     const contextWindow = typeof item.max_input_tokens === 'number' && item.max_input_tokens > 0
       ? item.max_input_tokens
       : 1_000_000
-    // ⚠️ `is_vl` 是**上游权威声明**，不要用「我觉得能不能收图」覆盖它。
-    const supportsImage = item.is_vl === true
-    models.push({ id, name, contextWindow, supportsImage, efforts: QWENWORK_INTL_EFFORTS })
+    /**
+     * ⚠️⚠️ **图片能力：实测覆盖优先于上游 `is_vl`**。
+     *
+     * 2026-11-22 真机实测证明上游这个字段**两个方向都错过**：
+     * - `deepseek-flash` 上游说 `false`，实测能看图（正确回答「红色」）；
+     * - `pro` 上游说 `true`，实测 4 种格式全 400/500。
+     *
+     * ⇒ 判据：`QWENWORK_IMAGE_OVERRIDES` 有就用它，没有才信 `is_vl`。
+     * 只用 `is_vl` 会让 `pro` 每次带图都 400（用户以为能用），
+     * 而 `deepseek-flash` 明明能用却被挡住。
+     */
+    const overridden = QWENWORK_IMAGE_OVERRIDES[id]
+    const supportsImage = overridden !== undefined ? overridden : item.is_vl === true
+    /**
+     * ⚠️ 倍率（`price_factor`）与图标（`icon`）**都要从远端取**：
+     * 上游改价/换图标时不该等插件发版。
+     * ⚠️ `price_factor` 缺失时不写（不编造），`displayNameOfQwenworkModel` 会跳过拼接。
+     */
+    const priceFactor = typeof item.price_factor === 'number' && Number.isFinite(item.price_factor)
+      ? item.price_factor
+      : undefined
+    const icon = typeof item.icon === 'string' && item.icon.trim().length > 0
+      ? item.icon.trim()
+      : QWENWORK_MODEL_ICONS[id]
+    models.push({
+      id,
+      name,
+      ...priceFactor === undefined ? {} : { priceFactor },
+      ...icon === undefined ? {} : { icon },
+      contextWindow,
+      supportsImage,
+      efforts: QWENWORK_INTL_EFFORTS,
+    })
   }
   return models.length > 0 ? models : fallback
 }
-
 /** 从 `i18n.display_name` 里取显示名（中文优先，回落英文，再回落 key）。 */
 function qwenworkDisplayName(item: Record<string, unknown>): string {
   const i18n = typeof item.i18n === 'object' && item.i18n !== null
@@ -389,8 +529,6 @@ function qwenworkDisplayName(item: Record<string, unknown>): string {
   return typeof item.key === 'string' ? item.key : '?'
 }
 
-/** 思考档位（四档实测生效，见 `QwenworkFallbackModel.efforts` 的文档）。 */
-export const QWENWORK_INTL_EFFORTS: readonly string[] = ['low', 'medium', 'high', 'max']
 
 /** 该模型是否为兜底表里登记过的。 */
 export function isKnownQwenworkModel(id: string): boolean {
