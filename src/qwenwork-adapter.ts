@@ -100,15 +100,6 @@ export interface QwenworkCatalogEntry {
   name: string
   /** 计费倍率（上游 `price_factor`），拼进展示名用。 */
   priceFactor?: number
-  /**
-   * 模型图标 URL（上游 `icon`）。
-   *
-   * ⚠️ **DSH 没有渲染位置**（`LlmModelInfo` 全库无 icon/logo 字段）⇒ 仅留档，
-   * `toCatalogEntry` **不传**它（传了也是死字段）。
-   */
-  icon?: string
-  /** 上游 `is_new`：是否新上架（用来画「新」徽标）。 */
-  isNew?: boolean
   contextWindow: number
   supportsImage: boolean
   efforts?: readonly string[]
@@ -234,18 +225,23 @@ function toCatalogEntry(m: QwenworkCatalogEntry): CatalogEntry {
      * ⇒ 传了也是死字段，故移除（数据仍保留在兜底表里，备将来有位置再用）。
      */
     /**
-     * ⚠️ **徽标（`badge`）** —— 宿主 `LlmModelInfo.badge` 的**唯一**渲染位置是
-     * 模型选择器每行的**名字右侧**（`ModelSelect.tsx` 的 `placement: 'option'`），
-     * 渲成 `Tag` 胶囊。`tone: 'success'` = 绿字 + 10% 绿底（= 截图那种观感）。
+     * ⚠️ **不传 `badge`**（2026-11-22 用户决定）：
      *
-     * ⚠️ **本家上游不下发任何促销信息**（实测 11 条：`price_factor` 最低 0.1、
-     * 无一条为 0，也没有 `promotion`/`discount` 字段）⇒ **做不出「限时免费」**。
-     * 唯一有的事实性徽标是 `is_new: true`（8 个模型）⇒ 用它画「新」。
-     * ⚠️ 绝不为了凑出绿框而编造促销（本仓红线）。
+     * > 「如果上游不会返回跟徽标相关的，那你就不需要做徽标，我只是你能跟上游
+     * >   展示同样效果。现在能展示倍率，那就行了。」
+     *
+     * 上游 `/api/chat-modes` **不下发任何促销/徽标字段**
+     * （实测 11 条：`price_factor` 最低 0.1、无一条为 0，也没有
+     * `promotion`/`discount`/`promo`）⇒ 做不出「限时免费」那种效果。
+     *
+     * ⚠️ 而我上一版用 `is_new` 编了个「新」徽标 —— 那是**自己发明的**，
+     * 网页上并没有这个东西 ⇒ **移除**（用户要的是「与上游展示同样效果」，
+     * 不是「多一个上游没有的角标」）。
+     *
+     * ⚠️ 宿主确实支持 `badge`（`{text, tone}`，渲成名字右侧胶囊），
+     * 能力是有的 —— 只是本家上游没有可画的内容。将来上游若下发促销
+     * （比如 `price_factor === 0` 或 `promotion` 字段），这里再补。
      */
-    ...m.isNew === true
-      ? { badge: { text: { en: 'New', zh: '新' }, tone: 'info' as const } }
-      : {},
     // ⚠️ 能力表缺失/未知时**一律回退 `['text']`**（硬约定：声明支持就必须真支持）。
     inputModalities: m.supportsImage
       ? (['text', 'image'] as const)
@@ -274,9 +270,7 @@ function fallbackEntries(): readonly QwenworkCatalogEntry[] {
   return QWENWORK_INTL_FALLBACK_MODELS.map((m) => ({
     id: m.id,
     name: m.name,
-    ...m.isNew === true ? { isNew: true } : {},
     ...m.priceFactor === undefined ? {} : { priceFactor: m.priceFactor },
-    ...m.icon === undefined ? {} : { icon: m.icon },
     contextWindow: m.contextWindow,
     supportsImage: m.supportsImage,
     ...m.efforts === undefined ? {} : { efforts: m.efforts },
