@@ -330,6 +330,53 @@ HTTP 200 ✅
 - 包名：`每日额度（次日刷新）` / `长期额度（注册赠送）`
   ⚠️ **不得写「推理不消耗」**（已被实测推翻）
 
+### 4.5.1 ★★★ 「锁定长期积分」的执行路径（不是空按钮）
+
+⚠️⚠️ `provider-registry.ts` 的 `permanentLock: true` **只**做两件事：
+① 让面板渲染出开关；② 让 `credits.permanentLock` RPC 接受写入。
+**它不执行任何拦截** —— 用户点了锁定、凭据照旧烧长期积分，
+且**没有任何用例会红**（Gitee IKLTHB ①，officeace 的原始问题）。
+
+守卫 `tests/unit/permanent-lock-execution.spec.ts` 会点名
+「声明了 `permanentLock: true` 却没有任何执行路径」。
+
+#### 「永久」在本家的准确含义（用户 2026-11-22 澄清）
+
+> 「这个按钮不是真的指只锁定永久，它是指锁定**超过环境变量长期或档次窗口**
+>   指定的长期及以上档次积分」
+
+⇒ 与 `splitBuddyCreditsByExpiry` **同一语义**：
+
+| 档位 | 判据 | 本家对应 |
+|---|---|---|
+| expiring / shortTerm | 到期 < `windowDays`（默认 15 天） | **daily 额度**（次日 00:00）|
+| permanent | 到期 ≥ `windowDays`，或没有到期时间 | **longterm 额度**（92 天后）|
+
+实测分档（`ahansogar1`，2026-11-22）：
+
+```
+每日额度（次日刷新）   remaining=200   到期还有 0 天   ← 窗口内，锁定后仍烧
+长期额度（注册赠送）   remaining=500   到期还有 92 天  ← 长期档，锁定后不烧
+```
+
+**这正是用户要的**：「优先用每天刷新的 200，先别动注册送的 500」。
+
+#### 实现（照 buddy 系，不另写一套）
+
+```
+src/qwenwork-lock.ts   fetchQwenworkBalanceForLock / qwenworkLockedError
+src/index.ts           BuddyBalanceSelector<QwenworkProduct, QwenworkCredential>
+                       + pickBuddyAccount + allowPermanent: !pool.permanentLocked(...)
+tests/unit/qwenwork-lock-wiring.spec.ts   14 条（三层判据）
+```
+
+⚠️ **报错必须按 `reason.kind` 四态分流**（`exhausted` / `unknown` /
+`no-candidates` / `credential-only`）：混成一句「额度都已用尽」会让
+「网络抖动」被当成「钱花完了」⇒ 用户去解锁 ⇒ **不可撤回地烧长期积分**。
+
+⚠️ `degradeOnUnknown: modelId === undefined`：目录路径查不到余额要降级放行
+（否则一次抖动就把模型列表清空，magicrew 真机踩过）；请求路径严格拦截。
+
 ### 4.6 ⚠️ 鉴权是 Bearer，**cookie 一律 401**
 
 网页版确实用 `token` cookie，但 API **不认** cookie。
@@ -360,23 +407,51 @@ HTTP 200 ✅
 
 ## 5. 实测数据（全部真机，2026-11-22）
 
-### 5.1 能力矩阵
+### 5.1 模型矩阵（**11 个**，以上游 `/api/chat-modes` 为准）
 
-| 模型 | HTTP | 工具调用 | 图片 | 上下文 |
+⚠️⚠️ **2026-11-22 用 ego-browser 实测校正** —— 我此前写的「9 个模型」有三处错：
+
+| 我的错 | 真相 |
+|---|---|
+| 写了 `deepseek-v4-pro` | **不存在**（早期手填测试被接受的野名字）|
+| `pro` 标 `supportsImage: false` | 上游 `is_vl: true` ⇒ **收图** |
+| 漏了 `qwen3.8-flash` / `minimax-m3.1-flash` | 两个都在目录里 |
+
+| key | 显示名 | 倍率 | 视觉 | 协议 |
 |---|---|---|---|---|
-| `flash` | 200 | ✅ | ✅ | ≥1M |
-| `pro` | 200 | ✅ | ❌ **400** | ≥1M |
-| `deepseek-flash` | 200 | ✅ | ✅ | ≥1M |
-| `deepseek-v4-pro` | 200 | ✅ | ✅ | ≥1M |
-| `glm-5.3` | 200 | ✅ | ❌ **400** | ≥1M |
-| `glm-5.3-flash` | 200 | ✅ | ✅ | ≥1M |
-| `qwen3.8-max` | 200 | ✅ | ✅ | ≥1M |
-| `qwen4-max` | 200 | ✅ | ✅ | ≥1M |
-| `kimi-k3.1-pro` | 200 | ✅ | ✅ | ≥1M |
+| `flash` | 标准 | 0.1 | ✅ | openai |
+| `advanced` | 高级 | 1 | ❌ | openai |
+| `pro` | 旗舰 | 1 | ✅ | openai |
+| `qwen4-max` | Qwen4-Max | 1.4 | ✅ | **anthropic** |
+| `qwen3.8-max` | Qwen3.8-Max | 1.9 | ✅ | openai |
+| `qwen3.8-flash` | Qwen3.8-Flash | 0.1 | ✅ | openai |
+| `deepseek-flash` | DeepSeek-V4.1-Flash | 0.2 | ❌ | openai |
+| `glm-5.3` | GLM-5.3 | 1.3 | ❌ | openai |
+| `glm-5.3-flash` | GLM-5.3-Flash | 0.2 | ✅ | openai |
+| `kimi-k3.1-pro` | Kimi-K3.1-Pro | 2.6 | ✅ | openai |
+| `minimax-m3.1-flash` | MiniMax-M3.1-Flash | 0.2 | ✅ | **anthropic** |
 
-⚠️ `qwork-auto` / `qwork-lite` / `qwork-standard` / `qwork-advanced` / `qwork-ultimate`
-**全部 400**；magpie 源码里的 `qwen3.8-max-preview` 也是 400。
+全部 `max_input_tokens` = **1,000,000**（上游声明，与我实测的 1.2M 报错边界一致）。
 
+### 5.1.0 ★★★ **有远端目录端点**（我此前说「没有」是错的）
+
+```
+GET `https://qwenwork.ai/api/chat-modes`   (Bearer)
+→ { "qwork": [11 个模型], "qwork-web": [...] }
+```
+
+每条带 `key` / `i18n.display_name.zh` / `price_factor` / `is_vl` / `is_reasoning` /
+`max_input_tokens` / `context_config` / `format`（openai | anthropic）/ `enable`。
+
+⚠️ **它在网页域**：`gateway.qwenwork.ai/api/chat-modes` 是 **404**。
+
+⚠️⚠️ **教训**：我原先探测了 `gateway.../algo/api/v2/model/list`（403，要 WASM 签名）
+和 `/v1/models`（404）就得出「没有目录端点」—— **只看 API 域不够，
+网页自己用的端点往往在网页域**。用 ego-browser 打开 `qwenwork.ai/app/`、
+点开模型选择器看网络面板才发现它。
+
+⇒ 现在适配器**优先用远端**（10 分钟缓存、失败 60 秒短缓存、单飞），
+静态表降级为兜底 ⇒ **上游加模型不需要改代码**。
 ### 5.1.1 ⚠️ 思考档位是四档（low → medium → high → max）
 
 **实测**（2026-11-22，每档采样 2~3 次看 `reasoning_tokens` 均值）：
