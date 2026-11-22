@@ -242,23 +242,57 @@ describe('产品配置', () => {
    * DSH 把它当展示顺序，铺成横向轴时顺序反了会变成「左强右弱」）。
    */
   /**
-   * ⚠️⚠️ **四档必须全部声明，且是强度序（弱 → 强）**。
+   * ★★★ **档位不是全模型都生效**（2026-11-22 逐模型实测，用户质疑后复测）。
    *
-   * 2026-11-22 真机实测（每档采样 2~3 次看 reasoning_tokens 均值），
-   * 以 `pro` 为例四档严格递增：low 29 → medium 53 → high 67 → **max 419**。
+   * ## 我先前的错误
    *
-   * ⚠️ 早先只声明 `['low','high']` 是**漏了两档** —— 当时只测了
-   * 「high 让 reasoning_tokens 从 0 变正」这一个判据，没意识到还有梯度。
-   * 这条断言就是防止再漏。
+   * 只测了 `glm-5.3` 一个模型（low 42 → max 444，×10.6），就写成
+   * **全模型共享常量** —— 那只对 glm-5.3 成立。
+   *
+   * ## 逐模型复测结果（每档采样 2~3 次，判据 max/low ≥ 1.5）
+   *
+   * | 模型 | low | max | 倍数 | 判定 |
+   * |---|---|---|---|---|
+   * | `pro` | 11 | 642 | ×58.4 | ✅ |
+   * | `glm-5.3-flash` | 19 | 374 | ×19.7 | ✅ |
+   * | `glm-5.3` | 33 | 471 | ×14.3 | ✅ |
+   * | `qwen4-max` | 65 | 222 | ×3.4 | ✅ |
+   * | `minimax-m3.1-flash` | 62 | 113 | ×1.8 | ✅ |
+   * | `qwen3.8-max` | 198 | 307 | ×1.6 | ✅ |
+   * | `flash` | 234 | 225 | ×0.96 | ❌ |
+   * | `deepseek-flash` | 160 | 150 | ×0.94 | ❌ |
+   * | `kimi-k3.1-pro` | 316 | 322 | ×1.02 | ❌ |
+   * | `qwen3.8-flash` | 209 | 257 | ×1.2 | ❌ |
+   *
+   * ⚠️ 上游**不校验**这个字段（乱写也回 200）⇒ 给无效模型声明档位
+   * 不会报错，只会给用户一个「选了没反应」的菜单（本仓纪律不许）。
    */
-  it('★★ 思考档位是四档且为强度序（low → medium → high → max）', () => {
+  it('★★★ 只有实测有效的 6 个模型声明档位，其余不声明', () => {
+    const EXPECTED_WITH_EFFORTS = [
+      'glm-5.3', 'glm-5.3-flash', 'minimax-m3.1-flash',
+      'pro', 'qwen3.8-max', 'qwen4-max',
+    ]
     for (const m of QWENWORK_INTL_FALLBACK_MODELS) {
-      expect(m.efforts, `${m.id} 应声明四档`).toEqual(['low', 'medium', 'high', 'max'])
-      // ⚠️ 反向：绝不能只有两档（那是漏声明）。
-      expect(m.efforts, `${m.id} 不能只声明 low/high`).not.toEqual(['low', 'high'])
-      // ⚠️ 强度序：max 必须在最后（DSH 按此顺序展示，反了会「左强右弱」）。
-      expect(m.efforts?.[m.efforts.length - 1]).toBe('max')
-      expect(m.efforts?.[0]).toBe('low')
+      if (EXPECTED_WITH_EFFORTS.includes(m.id)) {
+        expect(m.efforts, m.id + ' 实测有效，必须声明档位').toEqual(['low', 'medium', 'high', 'max'])
+        // ⚠️ 强度序：max 最后、low 最前（DSH 按此顺序展示）。
+        expect(m.efforts?.[0]).toBe('low')
+        expect(m.efforts?.[m.efforts.length - 1]).toBe('max')
+      } else {
+        expect(m.efforts, m.id + ' 实测无区分，绝不能声明档位（会变成无效菜单）').toBeUndefined()
+      }
+    }
+  })
+
+  /**
+   * ★★ **反向**：4 个实测无效的模型必须**不**声明档位。
+   *
+   * 这条单独列出，因为「漏声明」和「错声明」是两个方向的缺陷。
+   */
+  it('★★ flash / deepseek-flash / kimi / qwen3.8-flash 不声明档位', () => {
+    const byId = new Map(QWENWORK_INTL_FALLBACK_MODELS.map((m) => [m.id, m]))
+    for (const id of ['flash', 'deepseek-flash', 'kimi-k3.1-pro', 'qwen3.8-flash']) {
+      expect(byId.get(id)?.efforts, id + ' 实测无区分').toBeUndefined()
     }
   })
 })
