@@ -2,7 +2,7 @@
 
 > **文件**：`dsh-providers-hub/QWENWORK-INTL-HANDOFF.md`
 > **分支**：`feat/qwenwork-intl-provider`
-> **最后更新**：2026-11-22
+> **最后更新**：2026-11-23
 >
 > 📌 **怎么用**：每次新会话开始、或要动这个分支时，让 AI **先读这份文档**。
 > 它自成体系——读完不需要再看别处就能接手。
@@ -578,6 +578,18 @@ dsh plugin --profile desktop add "file:E:\Data\data_dsh\2026\dsh-agent-proxy\dsh
 
 **验证结果**：`tsc`（src + tests）全绿；**14996 passed / 8 failed**（那 8 条即上表第 2 项）；
 新增 67 条单测全通过；真机端到端 6/6 通过。
+
+### 7.1 上游功能已合入：登录授权页「自动打开浏览器」开关（2026-11-23，PR #144）
+
+- 上游 PR：https://github.com/iJetLi/dsh-providers-hub/pull/144
+  （分支 `feat/login-auto-open-browser`，fork `hansomgar`；**不含本分支任何 qwenworkintl 提交**）。
+- 本分支通过 merge **`ae98f3d3`** 合入；开关在 **Jet Hub → 设置 → 登录授权**，默认**开**（= 改动前行为）。
+- 关：不自动开窗，授权链接复制到剪贴板并显示在账号面板里（带「复制链接」按钮）；
+  宿主也不再开 CodeArts / OfficeAce 的无痕窗、不再开 Raccoon 授权页。
+- 文档：`docs/agent-notes/client-ui.md` **第 28 节**（两条腿 / CDP 渠道例外 / 设置弹窗 780×940）。
+- 验证：`tsc`（src + tests）全绿；新增/扩展 55 条用例全绿；PR worktree 全量
+  **14990 passed / 7 failed**（全部为 `origin/master` 基线已知失败，见 §7 第 2 项）。
+- ⚠️ 构建后**由用户手动重启 DSH** 验收（本会话未重启）。
 
 ---
 
