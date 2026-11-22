@@ -9,6 +9,7 @@ import {
   describeRun,
   isAutoCheckinExcluded,
   isAutoCheckinOptedIn,
+  doubaoCheckinEnabled,
   DEFAULT_AUTO_CHECKIN_TIMES,
   isUnsupportedCheckin,
   latestDueSlotKey,
@@ -196,12 +197,32 @@ describe('ZCode 自动签到（opt-in，默认关）', () => {
     expect(calls).toEqual([])
   })
 
-  it('★ 只放行 zcode：排除表里其余渠道（doubao）不受这个开关影响', async () => {
-    expect(isAutoCheckinExcluded('doubao')).toBe(true)
+  /**
+   * ⚠️⚠️ **2026-11-23 改写**（PR #142 把 `doubao` 移出排除表后，原用例的前提没了）。
+   *
+   * 原用例断言「zcode 开关只放行 zcode、不影响**排除表里其余渠道**（doubao）」——
+   * 但 `doubao` 已不在排除表里，**排除表现在只剩下 zcode 自己**，
+   * 「其余渠道」这个样本消失了 ⇒ 原断言既测不到东西也会红。
+   *
+   * ⇒ 改成直接守卫 PR #142 的**新事实**：
+   * ① 排除表**只剩** zcode（doubao 已移出）；
+   * ② zcode 仍默认关、`setZcodeEnabled(true)` 后才会跑（opt-in 语义没被 #142 带歪）。
+   */
+  it('★ 排除表现在只剩 zcode（doubao 已移出）；zcode 仍是 opt-in', async () => {
+    expect(isAutoCheckinExcluded('dycode' as never), '不存在的渠道不该被排除').toBe(false)
+    expect(isAutoCheckinExcluded('doubao'), 'PR #142：doubao 已移出排除表').toBe(false)
+    expect(isAutoCheckinExcluded('zcode'), 'zcode 仍是排除表里唯一的成员（有代价：阿里云 captcha 设备配额）').toBe(true)
+
+    /**
+     * 行为侧只断言**一轮**：未打开 zcode 开关时，doubao 在链里、zcode 不在。
+     *
+     * ⚠️ 不再断言第二轮 —— `runIfDue()` 有**每轮水位线**（今天跑过就不再跑），
+     * 第二轮 `setZcodeEnabled(true)` 之后 `runIfDue()` 会因水位直接返回（实测 `[]`）。
+     * 「打开 zcode 开关后它才进链」由本文件另一条 `★★ 整轮不记账时…` 覆盖。
+     */
     const { runner, calls } = makeRunner({ providers: ['doubao', 'zcode'] })
-    await runner.setZcodeEnabled(true)
     await runner.runIfDue()
-    expect(calls).toEqual(['zcode'])
+    expect(calls, 'zcode 默认关（opt-in）；doubao 已在默认链里').toEqual(['doubao'])
   })
 
   it('★★ 整轮不记账时，失败的 zcode 仍推进**自己**的水位线 ⇒ 不再拉第二次浏览器', async () => {
@@ -869,13 +890,14 @@ describe('自动签到：排除「签到有代价」的渠道', () => {
       .filter((d) => d.autoCheckinExcluded === true)
       .map((d) => d.id)
       .sort()
-    // ⚠️ 2026-11-03 加 doubao（签到要带 a_bogus 签名，需起浏览器 ⇒ 与 zcode 同型排除）。
+    // ⚠️ 2026-11-22：doubao 已移出排除表（签到只起一次 headless 浏览器，代价可接受）。
+    //    zcode 仍留（阿里云 captcha 按设备限流，属第三方配额消耗）。
     expect(
       excluded,
       '排除表与 registry 漂移：多出 = 有家被误排除（用户会失去自动签到），'
       + '少出 = 有家「签到有代价」却没被排除（每次启动都会拉起 headful 浏览器）',
-    ).toEqual(['doubao', 'zcode'])
-    // ⚠️ 写死 `['doubao', 'zcode']` 是**有意**的：新增同样要起浏览器/产 captcha 的家时，
+    ).toEqual(['zcode'])
+    // ⚠️ 写死 `['zcode']` 是**有意**的：新增同样要产第三方 captcha 的家时，
     //    这条会先红，逼作者复核「它是不是也该进排除表」（而不是静默漏掉）。
   })
 })
@@ -1690,5 +1712,130 @@ describe('ZCode opt-in 的 sanitize 语义', () => {
     const doc = sanitizeAutoCheckin({ modelscopeEnabled: false, zcodeEnabled: true })
     expect(doc.modelscopeEnabled).toBe(false)
     expect(doc.zcodeEnabled).toBe(true)
+  })
+})
+
+describe('豆包自动签到开关（2026-11-22 用户需求）', () => {
+  it('doubaoCheckinEnabled：缺席跟随 registry，有值以用户表态为准（三态）', () => {
+    // 缺席 ⇒ 与 registry 的默认口径一致（默认口径随另一条改动而变，故这里比着算）
+    expect(doubaoCheckinEnabled({})).toBe(isAutoCheckinExcluded('doubao') === false)
+    expect(doubaoCheckinEnabled({ doubaoEnabled: true })).toBe(true)
+    expect(doubaoCheckinEnabled({ doubaoEnabled: false })).toBe(false)
+  })
+
+  it('用户关掉豆包 ⇒ 一次 claim 都不发，文案是「自动签到已关闭」', async () => {
+    const { runner, calls, store } = makeRunner({
+      providers: ['doubao', 'buddy'],
+      initial: { doubaoEnabled: false },
+    })
+    await runner.runIfDue()
+    // ⚠️ 判据是「没打上游」：豆包签到的代价是起一次浏览器，多余调用比多一条
+    //    状态文字贵得多。
+    expect(calls).toEqual(['buddy'])
+    expect(store.current().channels.find((entry) => entry.provider === 'doubao')?.text)
+      .toBe('自动签到已关闭')
+    // 而且它不该拖住整轮水位线（进 unretryable）
+    expect(store.current().pendingSlot).toBe('')
+  })
+
+  it('用户打开豆包 ⇒ 即使 registry 把它登记成「有代价」也要真的 claim', async () => {
+    const { runner, calls, store } = makeRunner({
+      providers: ['doubao', 'buddy'],
+      initial: { doubaoEnabled: true },
+    })
+    await runner.runIfDue()
+    // 只在 registry 仍把它排除时才有判别力（默认纳入后这条恒真，不算白测：
+    // 它守的是「用户开关不能反过来把默认参加的家挡掉」）。
+    expect(calls).toContain('doubao')
+    expect(store.current().channels.find((entry) => entry.provider === 'doubao')?.text)
+      .not.toBe('需手动签到')
+  })
+
+  it('setDoubaoEnabled 两个方向都落盘（三态：删键等于抹掉用户表态）', async () => {
+    const { runner, store } = makeRunner()
+    expect(runner.doubaoEnabled()).toBe(isAutoCheckinExcluded('doubao') === false)
+    await runner.setDoubaoEnabled(false)
+    expect(store.current().doubaoEnabled).toBe(false)
+    expect(runner.doubaoEnabled()).toBe(false)
+    expect(runner.state().doubaoCheckinEnabled).toBe(false)
+    await runner.setDoubaoEnabled(true)
+    expect(store.current().doubaoEnabled).toBe(true)
+    expect(runner.doubaoEnabled()).toBe(true)
+    expect(runner.state().doubaoCheckinEnabled).toBe(true)
+  })
+
+  it('sanitize：true / false 都保留，脏值一律丢弃（= 跟随 registry）', () => {
+    expect(sanitizeAutoCheckin({ doubaoEnabled: false }).doubaoEnabled).toBe(false)
+    expect(sanitizeAutoCheckin({ doubaoEnabled: true }).doubaoEnabled).toBe(true)
+    expect(Object.hasOwn(sanitizeAutoCheckin({}), 'doubaoEnabled')).toBe(false)
+    for (const raw of ['false', 'true', 0, 1, null]) {
+      expect(Object.hasOwn(sanitizeAutoCheckin({ doubaoEnabled: raw }), 'doubaoEnabled'),
+        `raw=${String(raw)} 不该落键`).toBe(false)
+    }
+    // 往返：落盘后重新读出仍是同一个值（否则开关活不过一次重启）
+    expect(sanitizeAutoCheckin(sanitizeAutoCheckin({ doubaoEnabled: false })).doubaoEnabled).toBe(false)
+  })
+})
+
+/**
+ * ★★★ **「有代价」与「默认进链」必须解耦**（PR #142 的真实缺陷，2026-11-23 主理修复）。
+ *
+ * ## 缺陷
+ *
+ * 原先 `costly = isAutoCheckinExcluded(provider)` —— 一个字段承重两个**方向相反**的语义：
+ * 「默认进不进链」与「失败要不要重试」。PR #142 为了让豆包默认进链把它置 `false`，
+ * 顺手把「失败不重试」也关掉了 ⇒ 一次失败、甚至一次 **`inactive`**
+ *（「今天没活动」这种**正常态**）之后，下一轮又 claim ⇒ 又起 N 个浏览器。
+ * 纯豆包池 30 分钟封顶 ⇒ N=10 时最多 **480 次/天**（同一路径下 zcode 是零请求）。
+ *
+ * ## 用例要守的行为
+ *
+ * 豆包**一次 `inactive`** 之后，**推进一个时段再跑**，**不得**再次 `claim`
+ *（`inactive` 不是失败，但它已经付过一次起浏览器的代价）。
+ *
+ * ⚠️ 必须推进时间：`runIfDue()` 有 30 分钟时段闸门，不推进的话第二轮
+ * 会因时段没到直接返回 ⇒ 用例**恒真**、测不到任何东西（本仓踩过这种假绿）。
+ */
+describe('有代价渠道（豆包）：一次 inactive 后不得在本日重试', () => {
+  it('★★★ 起浏览器跑过一次（inactive）⇒ 推进 31 分钟后仍不再 claim', async () => {
+    let now = NOON_UTC8
+    const calls: string[] = []
+    const { runner } = makeRunner({
+      providers: ['doubao'],
+      now: () => now,
+      claim: async () => {
+        calls.push('doubao')
+        return {
+          ok: true,
+          value: { summary: { claimed: 0, totalCredit: 0, alreadyClaimed: 0, inactive: 1, failed: 0 } },
+        }
+      },
+    })
+    await runner.runIfDue()
+    expect(calls, '第一轮应当真的跑一次').toEqual(['doubao'])
+
+    now += 31 * 60 * 1000   // 推进 31 分钟 ⇒ 跨过一个时段
+    await runner.runIfDue()
+    expect(
+      calls,
+      '豆包一次尝试 = 一棵 headless Chromium（失败地板 30.1s）⇒ 本日不得因子句「今天没活动」再起一次',
+    ).toEqual(['doubao'])
+  })
+
+  it('★★★ 对照：普通渠道（无代价）失败后应当**照常重试**（别把判据改过头）', async () => {
+    let now = NOON_UTC8
+    const calls: string[] = []
+    const { runner } = makeRunner({
+      providers: ['buddy'],
+      now: () => now,
+      claim: async () => {
+        calls.push('buddy')
+        return { ok: false, error: { code: 'bad-request', message: '上游抖动' } }
+      },
+    })
+    await runner.runIfDue()
+    now += 31 * 60 * 1000
+    await runner.runIfDue()
+    expect(calls.length, '普通渠道不该被这条判据连坐').toBeGreaterThan(1)
   })
 })
