@@ -377,6 +377,45 @@ tests/unit/qwenwork-lock-wiring.spec.ts   14 条（三层判据）
 ⚠️ `degradeOnUnknown: modelId === undefined`：目录路径查不到余额要降级放行
 （否则一次抖动就把模型列表清空，magicrew 真机踩过）；请求路径严格拦截。
 
+#### ⚠️⚠️⚠️ 包必须写 `deductionEndTime`（2026-11-22 真机报障，最隐蔽的一个坑）
+
+**症状**：面板显示两个账号各有「临期 200」，但锁定长期积分后报
+「所有账号的这类额度都已用尽」，一个号都用不了。
+
+**根因**：分档函数 `splitBuddyCreditsByExpiry`（`buddy-balance-rank.ts:365`）
+**只读 `pkg.deductionEndTime`**，**完全不读** `expiredTime`：
+
+```ts
+const endTime = pkg.deductionEndTime   // ← 唯一入口
+```
+
+而 `buildQwenworkPackages` 当时只填了 `expiredTime` ⇒ `deductionEndTime` 恒 `undefined`
+⇒ 按该函数判据「≥ 15 天 **或未下发** ⇒ 落永久桶」⇒ **两个池都被判「永久」**
+⇒ 锁定后 `allowPermanent: false` ⇒ 所有账号不可用。
+
+⚠️ **为什么面板却显示「临期」**：那是**前端** `credit-expiry.js` 的 `packageExpiryMs`，
+它「优先 `deductionEndTime`、缺失才回落 `expiredTime`」⇒ **前后端两套判据**，
+同一份数据在面板是「临期」、在选号是「永久」。这正是本仓红线「同一语义两套判据」的形态。
+
+**修复**：`deductionEndTime` 与 `expiredTime` **两个都要写**（前者给后端分档，
+后者给前端显示），读不到就都不写（不编造）。
+
+**真实数据验证**（修复前 → 修复后）：
+
+```
+ahansogar   临期 0  →  临期 0     永久 357.02   ← daily 确实 0，正确
+ahansogar1  临期 0  →  临期 200   永久 500      ← 200 曾被误判成「永久」
+ahansogar2  临期 0  →  临期 200   永久 500      ← 同上
+```
+
+**守卫 4 条**（含反向对照）：字段存在性 + 端到端调 `splitBuddyCreditsByExpiry` +
+不编造 + 「只给 `expiredTime` 会判永久」的缺陷形态。
+**变异验证**：删掉 `deductionEndTime` ⇒ 2 条变红。
+
+⚠️ **通用教训**：给本仓任何 provider 造 `CreditPackage` 时，
+**只要它要参与到期分档，就必须写 `deductionEndTime`** ——
+`expiredTime` 只是前端显示字段，**后端分档不认它**。
+
 ### 4.6 ⚠️ 鉴权是 Bearer，**cookie 一律 401**
 
 网页版确实用 `token` cookie，但 API **不认** cookie。
