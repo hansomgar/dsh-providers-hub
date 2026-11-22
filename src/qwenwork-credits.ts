@@ -137,9 +137,10 @@ export function buildQwenworkPackages(
   snapshot: QwenworkWalletsSnapshot,
   now: number = Date.now(),
 ): readonly CreditPackage[] {
-  return snapshot.wallets.map((wallet, index) => {
+  return snapshot.wallets.map((wallet) => {
     const isDaily = isQwenworkDailyWallet(wallet, now)
     const hasExpiry = typeof wallet.validTo === 'string' && Number.isFinite(Date.parse(wallet.validTo))
+    const expiryMs = hasExpiry ? Date.parse(wallet.validTo as string) : undefined
     const name = isDaily
       ? '每日额度（次日刷新）'
       // ⚠️ **不能写「推理不消耗」**（2026-11-22 实测推翻）：daily 用完后
@@ -160,6 +161,39 @@ export function buildQwenworkPackages(
       cycleStartTime: '',
       cycleEndTime: '',
       expiredTime: hasExpiry ? wallet.validTo as string : '',
+      /**
+       * ⚠️⚠️ **`deductionEndTime` 必须写 —— 这是分档判据的唯一入口**（2026-11-22 修复）。
+       *
+       * ## 缺陷（用户真机报障）
+       *
+       * 面板显示「临期 200」，但锁定长期积分后报「所有账号的这类额度都已用尽」。
+       *
+       * ## 根因
+       *
+       * 本仓分档函数 `splitBuddyCreditsByExpiry`（`buddy-balance-rank.ts:365`）
+       * **只读 `pkg.deductionEndTime`**，**完全不读** `expiredTime`：
+       *
+       * ```ts
+       * const endTime = pkg.deductionEndTime   // ← 唯一入口
+       * ```
+       *
+       * 我原先只填了 `expiredTime` ⇒ `deductionEndTime` 恒 `undefined`
+       * ⇒ **两个池都被判「永久」**（`buddy-balance-rank.ts` 的注释：
+       * 「`deductionEndTime ≥ 15 天` **或未下发** ⇒ 落永久桶」）
+       * ⇒ 锁定后 `allowPermanent: false` ⇒ **所有账号都不可用**。
+       *
+       * ⚠️ 面板之所以显示「临期 200」：那是**前端** `credit-expiry.js` 的
+       * `packageExpiryMs`，它「优先 `deductionEndTime`、缺失才回落 `expiredTime`」
+       * ⇒ 前端和好后端的判据**不是同一份**，于是同一份数据在面板是「临期」、
+       * 在选号是「永久」—— 这正是本仓红线「同一语义两套判据」的形态。
+       *
+       * ⚠️ **必须两个都写**：`deductionEndTime` 给后端分档，
+       * `expiredTime` 给前端显示（两边都要有，缺一个就有一边退化）。
+       *
+       * ⚠️ 与 `magicrew-credits.ts:399` / `minimax-credits.ts:724` /
+       * `lobsterai-credits.ts:397` 同款写法：**读不到就不写**（不编造）。
+       */
+      ...expiryMs === undefined ? {} : { deductionEndTime: expiryMs },
       ...hasExpiry ? {} : { expiryUnknown: true },
     } satisfies CreditPackage
   })

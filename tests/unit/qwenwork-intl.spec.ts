@@ -420,6 +420,109 @@ describe('额度三池分离（本家最容易误导用户的一处）', () => {
   })
 })
 
+/**
+ * ★★★ deductionEndTime 必须写（2026-11-22 用户真机报障）。
+ *
+ * ## 缺陷
+ *
+ * 面板显示「临期 200」，但锁定长期积分后报「所有账号的这类额度都已用尽」。
+ *
+ * ## 根因
+ *
+ * 分档函数 splitBuddyCreditsByExpiry（buddy-balance-rank.ts:365）
+ * **只读 pkg.deductionEndTime**，**完全不读** expiredTime：
+ *
+ *     const endTime = pkg.deductionEndTime   // ← 唯一入口
+ *
+ * 我只填了 expiredTime ⇒ deductionEndTime 恒 undefined
+ * ⇒ 两个池都被判「永久」⇒ 锁定后 allowPermanent: false ⇒ **所有账号不可用**。
+ *
+ * ⚠️ 面板之所以显示「临期」：那是**前端** credit-expiry.js 的 packageExpiryMs
+ * （优先 deductionEndTime、缺失才回落 expiredTime）
+ * ⇒ **前后端两套判据**，同一份数据在面板是「临期」、在选号是「永久」。
+ * 这正是本仓红线「同一语义两套判据」的形态。
+ */
+describe('★★★ 包必须带 deductionEndTime（否则分档恒判「永久」）', () => {
+  const now = Date.parse('2026-11-22T10:00:00+08:00')
+  const snapshot = {
+    daily: 200,
+    longterm: 500,
+    // daily 次日 00:00（约 0.58 天）、longterm 三个月后（约 92 天）
+    wallets: [
+      { balance: 200, validTo: '2026-11-23T00:00:00+08:00' },
+      { balance: 500, validTo: '2027-02-22T01:21:29+08:00' },
+    ],
+  }
+
+  it('★★★ 每个带 validTo 的包都写了 deductionEndTime', () => {
+    const packages = buildQwenworkPackages(snapshot, now)
+    expect(packages).toHaveLength(2)
+    for (const pkg of packages) {
+      expect(
+        pkg.deductionEndTime,
+        pkg.name + ' 缺 deductionEndTime ⇒ 后端分档会把它当「永久」',
+      ).toBeTypeOf('number')
+      // ⚠️ 必须等于 validTo 解析出的毫秒值。
+      expect(pkg.deductionEndTime).toBe(Date.parse(pkg.expiredTime))
+    }
+  })
+
+  /**
+   * ★★★ **端到端判据：真的用分档函数跑一遍**。
+   *
+   * 只断言「字段存在」不够 —— 若两值不一致（比如写成了秒），
+   * 字段在、分档仍错。故直接用共享的 splitBuddyCreditsByExpiry 验证。
+   */
+  it('★★★ 分档结果正确：daily 落「临期」、longterm 落「永久」', async () => {
+    const { splitBuddyCreditsByExpiry } = await import('../../src/buddy-balance-rank.js')
+    const balance = buildQwenworkBalance(snapshot, now)
+    const split = splitBuddyCreditsByExpiry(balance, now, 15 * 86400_000, 5 * 86400_000)
+    expect(split).toBeDefined()
+    // ⚠️ daily 200 在 15 天窗口内 ⇒ 落 expiring（**这是可用性判据**）。
+    expect(split.expiring, 'daily 必须落「临期」，否则锁定后该号不可用').toBe(200)
+    // ⚠️ longterm 500 在 92 天后 ⇒ 落 permanent。
+    expect(split.permanent).toBe(500)
+  })
+
+  /** ⚠️ 没有 validTo 时不写 deductionEndTime（**绝不编造日期**，本仓红线）。 */
+  it('★ 没有 validTo 时不写 deductionEndTime（不编造）', () => {
+    const packages = buildQwenworkPackages({ wallets: [{ balance: 10 }] }, now)
+    expect(packages[0].deductionEndTime).toBeUndefined()
+    expect(packages[0].expiryUnknown).toBe(true)
+  })
+
+  /**
+   * ★★ 反向对照：**只有 expiredTime 而缺 deductionEndTime** ⇒ 分档必判「永久」。
+   *
+   * 这条把缺陷形态本身钉死 —— 将来谁把 deductionEndTime 删掉，
+   * 上面那条会红，而这条解释**为什么**不能删。
+   */
+  it('★★ 反向：只给 expiredTime 不给 deductionEndTime ⇒ 分档判「永久」', async () => {
+    const { splitBuddyCreditsByExpiry } = await import('../../src/buddy-balance-rank.js')
+    // 手工构造一个「只有 expiredTime」的包（= 修复前的实现）。
+    const broken = {
+      total: 200,
+      expiredTotal: 0,
+      packages: [{
+        name: '每日额度',
+        unit: '积分',
+        remaining: 200,
+        total: 200,
+        totalKnown: false,
+        used: 0,
+        active: true,
+        cycleStartTime: '',
+        cycleEndTime: '',
+        expiredTime: '2026-11-23T00:00:00+08:00',
+        // ⚠️ 刻意不写 deductionEndTime。
+      }],
+    }
+    const split = splitBuddyCreditsByExpiry(broken, now, 15 * 86400_000, 5 * 86400_000)
+    expect(split).toBeDefined()
+    expect(split.expiring, '缺 deductionEndTime 时 200 会被误判成永久').toBe(0)
+    expect(split.permanent).toBe(200)
+  })
+})
 describe('额度折算原语 qwenworkExpiry', () => {
   const now = Date.parse('2026-11-22T10:00:00+08:00')
 
