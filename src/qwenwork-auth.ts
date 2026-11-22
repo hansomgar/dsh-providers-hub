@@ -540,6 +540,20 @@ export class QwenworkIntlAuth extends Service {
     if (resolved === undefined) return undefined
     return parseQwenworkCredential(resolved.value)
   }
+
+  /**
+   * 公开的按 ref 读凭据（**选号链路用**）。
+   *
+   * ⚠️ 与 `private readCredential` **共用同一实现**（不是复制一份）：
+   * 两处各写一套「什么算有效凭据」会让判据漂移（本仓红线）。
+   *
+   * ⚠️ 存在的理由：`BuddyBalanceSelector` 的 `resolveCredential` 与
+   * `createCredentialResolver` 的 `readCredential` 都需要它，
+   * 而 `private` 方法外部取不到。
+   */
+  async currentCredential(refName: string): Promise<QwenworkCredential | undefined> {
+    return await this.readCredential(refName)
+  }
 }
 
 /** 默认凭据 ref（等价于 `QWENWORK_INTL.defaultCredentialRef`）。 */

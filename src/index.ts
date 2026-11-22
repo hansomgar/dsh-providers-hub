@@ -62,7 +62,7 @@ import { createTokenLedgerStore } from './token-ledger-store.js'
  */
 import { buddyExpiringWindowDays } from './buddy-balance-rank.js'
 import { resolveCreditWindow, safeCreditWindowReader } from './credit-window.js'
-import { BuddyBalanceSelector } from './buddy-balance-selector.js'
+import { BuddyBalanceSelector, pickBuddyAccount } from './buddy-balance-selector.js'
 import type { BuddyNoAccountReason } from './buddy-balance-selector.js'
 import type { LoomyNoAccountReason } from './loomy-balance-selector.js'
 import { createCredentialResolver, NO_FREE_MODEL } from './credential-resolver.js'
@@ -230,7 +230,10 @@ import { qiniuModelsUrl, qiniuHeaders, type QiniuCredential } from './qiniu.js'
 //    `src/qwenwork-product.ts` 的模块头。
 import { QwenworkIntlAuth } from './qwenwork-auth.js'
 import { QwenworkAdapter, registerQwenworkLlm } from './qwenwork-adapter.js'
-import { QWENWORK_INTL } from './qwenwork-product.js'
+import { QWENWORK_INTL, type QwenworkProduct } from './qwenwork-product.js'
+// ⚠️ 「锁定长期积分」的**执行路径**：余额分档选号 + 按原因分流的报错文案。
+//    没有这两个 import 就只剩一个空按钮（见 `qwenwork-lock.ts` 模块头）。
+import { fetchQwenworkBalanceForLock, qwenworkLockedError } from './qwenwork-lock.js'
 import { qwenworkHeaders, qwenworkMaasSessionUrl, type QwenworkCredential } from './qwenwork.js'
 // MonkeyCode（`monkeycode` / `monkeycodeintl`，2026-11-02）：**本 fork 独有**。
 // 无 OAuth，但**主路径是浏览器登录**（`loginViaBrowser()` 开窗读 cookie；四审
@@ -4998,32 +5001,116 @@ export function apply(ctx: Context): void {
   //
   // 服务名由 QwenworkIntlAuth 依 product.id 派生，注册为 `ctx.qwenworkintlAuth`。
   const qwenworkintl = new QwenworkIntlAuth(ctx)
+  /**
+   * 千问办公国际站的**余额分档选号器**（2026-11-22）。
+   *
+   * ⚠️⚠️ **这是「锁定长期积分」的执行路径** —— 没有它，registry 里的
+   * `permanentLock: true` 只是一个渲染开关（`permanent-lock-execution.spec.ts`
+   * 会点名「声明了却没有任何执行路径」）。
+   *
+   * ⚠️ 复用 `BuddyBalanceSelector`（**泛型**的，非 buddy 系只需注入
+   * `fetchBalance` / `fetchBalanceDetailed` / `readCreditWindow`）——
+   * 参考 `magicrewBalanceSelector` 同款接法，**绝不**另写一套分档逻辑
+   *（那会让「同一语义两套判据」，本仓红线）。
+   *
+   * ⚠️ `readCreditWindow: safeCreditWindowReader(pool)` 必须传：
+   * 用户的 per-provider 窗口设置（含环境变量覆盖）要在**选号**与**面板文案**
+   * 两处同源，否则「面板说临期、选号当长期」。
+   */
+  const qwenworkintlBalanceSelector = new BuddyBalanceSelector<QwenworkProduct, QwenworkCredential>({
+    product: QWENWORK_INTL,
+    readCreditWindow: safeCreditWindowReader(pool),
+    // ⚠️ 必须给 `resolveCredential`：`select()` 只保证档位最优，不保证凭据可读。
+    resolveCredential: (refName) => qwenworkintl.currentCredential(refName),
+    /**
+     * ⚠️ 非 buddy provider **必填** —— 缺省会拼出畸形 URL 并静默失效。
+     *
+     * ⚠️ 不注入 `ctx.fetch`：本家不按出口 IP 分流，用全局 fetch 即可
+     * （与 magicrew / baizhi 同款；只有 qoder / minimax 那类按账号换出口的才需要）。
+     */
+    fetchBalance: async (credential, product) => await fetchQwenworkBalanceForLock(
+      credential,
+      product,
+    ),
+  })
   const qwenworkintlAdapter = registerQwenworkLlm(ctx, {
     // 单凭据回退 ref：池里没有该 provider 账号时用它（与其余 provider 同约定）。
     credentialRef: credentialRef(QWENWORK_INTL.defaultCredentialRef),
-    // 槽序列由**接线层**解析好传进来（适配器不直接读凭据）。
-    // `modelId` 透传：据此过滤「该模型正处于限流窗口」的账号。
+    /**
+     * 槽序列由**接线层**解析好传进来（适配器不直接读凭据）。
+     *
+     * ## ⚠️⚠️ 2026-11-22 改为走**余额分档选号**（原先只是「列出全部账号」）
+     *
+     * 原实现把所有启用账号平铺给适配器、由适配器按顺序轮换 —— 那样
+     * **`permanentLock` 无从生效**（它要求选号阶段就排除长期额度档）。
+     *
+     * 现在：`pickBuddyAccount` 读取锁定状态 + 余额分档 ⇒
+     * - 未锁定：临期 > 短期 > 长期，优先烧快到期的（**这是免费拿到的收益**）；
+     * - 已锁定：长期档被排除 ⇒ 只挑 daily 还有余额的账号。
+     *
+     * ⚠️ **取号失败必须抛错，绝不回落「列出全部」**：回fallback 会绕过锁定、
+     * 照样烧长期积分，使锁定形同虚设（`buddy-balance-selector.ts` 的
+     * `pickBuddyAccount` 注释逐字记录了这条）。
+     *
+     * ⚠️ `modelId` 缺省（目录路径）时**仍走分档**：目录不该因余额查不到而空，
+     * 故那条路径用 `degradeOnUnknown` 语义（查不到就放行）。
+     */
     slots: async (modelId?: string) => {
       const entries = await pool.listAccounts(QWENWORK_INTL.id)
-      const usable = await Promise.all(entries.map(async (entry) => {
-        if (!entry.enabled) return undefined
-        // ⚠️ 模型级限流标记：`modelId` 缺省时**不查**（目录路径刻意不传 ——
+      // ⚠️ 先按「启用 + 模型限流」筛候选（与其余 provider 同一判据）。
+      const candidates = entries.filter((entry) => {
+        if (!entry.enabled) return false
+        // ⚠️ 模型级限流：`modelId` 缺省时**不查**（目录路径刻意不传 ——
         //    传了会让被限流的账号把整个目录一起拖空）。
         if (modelId !== undefined && modelId.length > 0) {
           const resetAt = entry.modelRateLimits?.[modelId]
-          if (typeof resetAt === 'number' && resetAt > Date.now()) return undefined
+          if (typeof resetAt === 'number' && resetAt > Date.now()) return false
         }
-        const resolved = await ctx.credentials.resolve(credentialRef(entry.credentialRef))
-        if (!resolved) return undefined
-        try {
-          const parsed = JSON.parse(resolved.value) as QwenworkCredential
-          if (typeof parsed.access_token !== 'string' || parsed.access_token.length === 0) return undefined
-          return { id: entry.id, accessToken: parsed.access_token }
-        } catch {
-          return undefined
-        }
-      }))
-      return usable.filter((s): s is { id: string; accessToken: string } => s !== undefined)
+        return true
+      })
+      if (candidates.length === 0) return []
+      const picked = await pickBuddyAccount<QwenworkCredential>(
+        qwenworkintlBalanceSelector,
+        candidates.map((entry) => ({ id: entry.id, credentialRef: entry.credentialRef })),
+        {
+          // ★ 锁定状态：`false` ⇒ 长期额度档被排除。
+          allowPermanent: !pool.permanentLocked(QWENWORK_INTL.id),
+          resolveCredential: (refName) => qwenworkintl.currentCredential(refName),
+          /**
+           * ⚠️ **目录路径（`modelId === undefined`）查不到余额时降级放行**：
+           * 目录不该因为一次网络抖动而清空（否则用户一个模型都选不了）。
+           * 请求路径则**不降级** —— 那里必须严守锁定语义。
+           */
+          degradeOnUnknown: modelId === undefined,
+        },
+      )
+      if (picked.kind === 'account') {
+        return [{ id: picked.account.id, accessToken: picked.credential.access_token }]
+      }
+      /**
+       * ⚠️ **目录路径：选号失败时退回「全部候选」而不是抛错。**
+       *
+       * 理由：`slots()` 也被 `loadCatalogEntries` 调用，那里只要「有没有账号」
+       * 这个信号 —— 抛错会让整个 provider 的模型列表变成一条报错文案
+       *（`magicrew` 真机踩过：余额接口被网关拒绝 ⇒ 模型全没了）。
+       *
+       * ⚠️ 但这**不会**绕过锁定：目录路径拿到的 slot 只用于「列模型」，
+       * 不发起推理；真正发送时走 `modelId !== undefined` 那条，那里严格拦截。
+       */
+      if (modelId === undefined) {
+        const fallback = await Promise.all(candidates.map(async (entry) => {
+          const credential = await qwenworkintl.currentCredential(entry.credentialRef)
+          return credential === undefined
+            ? undefined
+            : { id: entry.id, accessToken: credential.access_token }
+        }))
+        return fallback.filter((s): s is { id: string; accessToken: string } => s !== undefined)
+      }
+      // 请求路径：抛错（绝不回落，否则锁定无效）。
+      throw qwenworkLockedError(QWENWORK_INTL.displayName, QWENWORK_INTL.id, resolveCreditWindow(
+        QWENWORK_INTL.id,
+        safeCreditWindowReader(pool),
+      ).windowDays)(picked.reason ?? { kind: 'no-candidates' })
     },
     accountPool: pool,
     product: QWENWORK_INTL,

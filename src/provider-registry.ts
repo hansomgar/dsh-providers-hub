@@ -961,6 +961,32 @@ export const PROVIDER_REGISTRY: readonly ProviderDescriptor[] = Object.freeze([
     //   - **不进** `SELF_HEAL_EXEMPT`（本家**有** refresh 端点，能自愈）。
     credits: { balance: true, dailyCheckin: false },
     /**
+     * ⚠️ **`permanentLock: true`**（2026-11-22 按用户要求补）。
+     *
+     * ## 这个开关在本家的语义
+     *
+     * 「永久」在本仓的定义是「**没有到期时间、或到期很远**的额度」
+     * （`buddy-balance-rank.ts` 的 `allowPermanent`：`false` 时**永久桶被拦
+     * ⇒ 该号被判不可用**）。本家的 `longterm_credits` 正好属于这一类
+     * —— 它三个月后才到期，实操上等同「长期备用」。
+     *
+     * 故锁定后：**只烧 daily（次日 00:00 到期）那一档，不碰 longterm**。
+     * 这正是用户要的行为（原话）：
+     * 「注册送的长期 500 积分先不使用，测试期间优先使用每天自动刷新的 200 积分」
+     * /「永久指的是没有过期时间和长期的」。
+     *
+     * ## ⚠️ 为什么本家能支持（而不是照抄别家）
+     *
+     * 本家的账是**瀑布扣减**（daily 空了扣 longterm，见 `qwenwork-credits.ts`
+     * 模块头）。锁定后 `allowPermanent: false` ⇒ longterm 那一档被排除
+     * ⇒ 选号阶段就**只挑 daily 还有余额的账号**，daily 全空的号被判不可用。
+     * 不锁定则两档都参与，账号更不容易「用完」。
+     *
+     * ⚠️ 这依赖 `usesExpiryWindow: true`（下面那个位）—— 前端文案要按
+     * 「N 天内到期」的窗口分档，「永久」与「临期」才分得开。
+     */
+    permanentLock: true,
+    /**
      * ⚠️ **`creditPackages: true`**（2026-11-22 补）：本家**能给出逐包明细**
      * （`buildQwenworkPackages` 按 `active_wallets.wallets[]` 逐个产出包，
      * 每个包都带 `expiredTime`）⇒ 面板据此渲染「长期 / 短期 / 临期」分档。
@@ -978,9 +1004,6 @@ export const PROVIDER_REGISTRY: readonly ProviderDescriptor[] = Object.freeze([
      * 刻意不同：那些家加这个位会让面板文案说「按天数筛选」而实际筛不了。
      */
     usesExpiryWindow: true,
-    // ⚠️ **`permanentLock` 刻意不加**：本家**没有**「永久积分」概念 ——
-    //    daily 次日就刷新、longterm 三个月后到期，两者都有真实期限。
-    //    加它会渲染出「锁定永久积分」按钮，而底层没有对应的锁定表。
     // ⚠️ **rateLimit 省略（= true）**：适配器**确实会写** modelRateLimits
     //   （`qwenworkRetryAfterMs`：429 走指数退避、`balance_insufficient` 归额度）。
     //   接线层注入了 `markLimited` ⇒「重测 / 重置」两个按钮都该保留。

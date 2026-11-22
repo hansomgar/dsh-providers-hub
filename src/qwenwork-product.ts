@@ -131,6 +131,34 @@ export interface QwenworkProduct {
   readonly maasSessionPath: string
   /** OpenAI 兼容元信息路径（拼在**账号上下文**路径之后，见下）。 */
   readonly accountContextPath: string
+
+  /**
+   * **模型目录端点**（网页域 `qwenwork.ai`，`GET /api/chat-modes`，Bearer 认证）。
+   *
+   * ⚠️⚠️ 2026-11-22 用 ego-browser 实测发现 —— 此前我一直以为「国际站没有可读的
+   * 目录端点」，**那个结论是错的**（我只探测了网关域和 `/algo/api/v2/...`，
+   * 没找到网页域的这个端点）。
+   *
+   * 返回形状：
+   *
+   * ```jsonc
+   * { "qwork": [ {
+   *     "key": "qwen3.8-flash",            // 真实模型 id
+   *     "i18n": { "display_name": { "zh": "Qwen3.8-Flash", … } },
+   *     "price_factor": 0.1,               // 计费倍率（相对基准）
+   *     "is_vl": true,                     // 是否收图
+   *     "is_reasoning": true,
+   *     "max_input_tokens": 1000000,
+   *     "context_config": { "1M": {…}, "200K": {…}, "400K": {…} },
+   *     "format": "openai",                // openai | anthropic
+   *     "enable": true, "is_default": true, "is_new": true
+   *   }, … ],
+   *   "qwork-web": [ … ] }                // 网页端专用那份，本适配器不用
+   * ```
+   *
+   * ⚠️ 它在**网页域**：`gateway.qwenwork.ai/api/chat-modes` 是 404。
+   */
+  readonly chatModesPath: string
   /**
    * 设备码登录的 OAuth `client_id`。
    *
@@ -172,6 +200,7 @@ export const QWENWORK_INTL: QwenworkProduct = {
   deviceRefreshPath: '/api/v1/deviceToken/refresh',
   maasSessionPath: '/api/desktop-sessions',
   accountContextPath: '/api/v1/adapter/user/account-context',
+  chatModesPath: '/api/chat-modes',
   // ⚠️ 国际站专属（与国内站不同，混用即 400 INVALID_DEVICE_FLOW）。
   clientId: 'cc65e5fc-05bd-4f5d-a4e8-0df19aa3d75a',
   redirectScheme: 'qwenwork://',
@@ -227,42 +256,141 @@ export interface QwenworkFallbackModel {
 }
 
 /**
- * 兜底模型表（**2026-11-22 真机实测快照**）。
+ * 兜底模型表（**2026-11-22 按上游真实目录校准**）。
  *
- * ## 为什么必须有一张非空的表
+ * ## ⚠️⚠️ 「国际站拿不到目录端点」是**错的**（2026-11-22 浏览器实测推翻）
  *
- * 国际站的**模型目录端点拿不到**：`gateway.qwenwork.ai/algo/api/v2/model/list`
- * 实测 **403**（需要 WASM 签名，那是 qoder 那套基础设施，国际站此处没有）。
- * 而 `/v1/models` 实测 **404**（换 MaaS token 之后打也没有）。
+ * 我原先探测了 `gateway.qwenwork.ai/algo/api/v2/model/list`（403，要 WASM 签名）
+ * 和 `/v1/models`（404），就得出「没有可读的目录端点」的结论并写进了注释。
  *
- * ⇒ 直接把兜底表置空的代价是本仓实测过的（`qiniu-product.ts` 模块头详述）：
+ * **实际有，而且在网页域**：
+ *
+ * ```
+ * GET https://qwenwork.ai/api/chat-modes
+ * Authorization: Bearer <access_token>
+ * → 200 { "qwork": [11 个模型], "qwork-web": [...] }
+ * ```
+ *
+ * ⚠️ 它是用 ego-browser 打开 `qwenwork.ai/app/`、点开模型选择器后
+ * 从网络面板发现的。**教训：探测「上游有没有某端点」时，只看 API 域不够，
+ * 网页自己用的端点往往在网页域。**
+ *
+ * ⇒ 现在 `parseQwenworkChatModes` 会解析它，适配器**优先用远端**，
+ * 本表只作远端不可达时的兜底（**不得为空**，理由见下）。
+ *
+ * ## 为什么兜底表仍必须非空
+ *
+ * 直接把兜底表置空的代价是本仓实测过的（`qiniu-product.ts` 模块头详述）：
  * `listAllModels()` 冷缓存恒 `[]` ⇒ `provider.status` 的 `models.total` 恒 0
  * ⇒ 设置页把整个 provider 误显示为「已关闭」，且模型选择器里无模型可关。
  *
- * 故这张表就是**唯一权威来源**，条目全部来自 9 个模型逐个「发一条真请求拿到
- * 200」的实测（见 `docs/agent-notes/providers-qwenwork-intl.md`）。
+ * ⇒ 本表 = 远端目录的**离线快照**（11 条，与 `/api/chat-modes` 逐条对齐）。
+ * 远端可用时以远端为准；上游加模型**不需要改代码**。
  *
- * ## ⚠️ 上游加模型后这张表会腐坏
- *
- * 这是**已知缺陷且已登记**：国际站没有可读的目录端点，无法远端刷新。
- * 缓解手段是「未知模型仍可手填 id 使用」+ 用户在面板上可随时改；
- * 若上游新增模型，需要更新这张表并发版。**不能**靠猜名字来「补全」——
- * 猜错的名字会得到 400，症状与「账号没权限」同形。
+ * ⚠️ **不要**靠猜名字来「补全」这张表 —— 猜错的名字会得到 400，
+ * 症状与「账号没权限」同形（`deepseek-v4-pro` 就是这么混进来的，见下）。
  */
 export const QWENWORK_INTL_FALLBACK_MODELS: readonly QwenworkFallbackModel[] = [
-  // ── 实测最快的档位（0.0933 分/10k 输入，200 分可跑约 2000 轮）──
-  { id: 'flash', name: '标准 (flash)', contextWindow: 1_000_000, supportsImage: true, efforts: ['low', 'medium', 'high', 'max'] },
-  { id: 'glm-5.3-flash', name: 'GLM-5.3 Flash', contextWindow: 1_000_000, supportsImage: true, efforts: ['low', 'medium', 'high', 'max'] },
-  { id: 'deepseek-flash', name: 'DeepSeek Flash', contextWindow: 1_000_000, supportsImage: true, efforts: ['low', 'medium', 'high', 'max'] },
-  // ── 高级档位 ──
-  // ⚠️ `pro` 与 `glm-5.3` **不收图**（实测 400），故 supportsImage: false。
-  { id: 'pro', name: '高级 (pro)', contextWindow: 1_000_000, supportsImage: false, efforts: ['low', 'medium', 'high', 'max'] },
-  { id: 'glm-5.3', name: 'GLM-5.3', contextWindow: 1_000_000, supportsImage: false, efforts: ['low', 'medium', 'high', 'max'] },
-  { id: 'deepseek-v4-pro', name: 'DeepSeek V4 Pro', contextWindow: 1_000_000, supportsImage: true, efforts: ['low', 'medium', 'high', 'max'] },
-  { id: 'qwen3.8-max', name: 'Qwen3.8-Max', contextWindow: 1_000_000, supportsImage: true, efforts: ['low', 'medium', 'high', 'max'] },
+  // ⚠️⚠️ **本表已按上游 `/api/chat-modes` 的真实目录校准**（2026-11-22 浏览器实测，
+  // 11 条）。`name` 用上游 `display_name.zh`，`supportsImage` 用 `is_vl`。
+  //
+  // | key | 显示名 | 倍率 | 视觉 | 协议 |
+  // |---|---|---|---|---|
+  // | `flash` | 标准 | 0.1 | ✅ | openai |
+  // | `advanced` | 高级 | 1 | ❌ | openai |
+  // | `pro` | 旗舰 | 1 | ✅ | openai |
+  // | `qwen4-max` | Qwen4-Max | 1.4 | ✅ | **anthropic** |
+  // | `qwen3.8-max` | Qwen3.8-Max | 1.9 | ✅ | openai |
+  // | `qwen3.8-flash` | Qwen3.8-Flash | 0.1 | ✅ | openai |
+  // | `deepseek-flash` | DeepSeek-V4.1-Flash | 0.2 | ❌ | openai |
+  // | `glm-5.3` | GLM-5.3 | 1.3 | ❌ | openai |
+  // | `glm-5.3-flash` | GLM-5.3-Flash | 0.2 | ✅ | openai |
+  // | `kimi-k3.1-pro` | Kimi-K3.1-Pro | 2.6 | ✅ | openai |
+  // | `minimax-m3.1-flash` | MiniMax-M3.1-Flash | 0.2 | ✅ | **anthropic** |
+  //
+  // ⚠️ 三个**被推翻的旧结论**（都写在这里防再犯）：
+  // 1. `deepseek-v4-pro` **不存在**（那是早期手填测试时被上游接受的名字，
+  //    但不在目录里；真实的是 `deepseek-flash`）；
+  // 2. `pro` **收图**（`is_vl: true`），旧表写 `false` 是错的；
+  //    同理 `glm-5.3` 的 `is_vl` 也是 `false`，但那是**上游声明**，
+  //    与我早期「实测 400」的结论一致 —— 保留 `false`；
+  // 3. `qwen3.8-flash` / `minimax-m3.1-flash` **之前漏了整个条目**。
+  //
+  // ⚠️ `format: 'anthropic'` 的两个模型（`qwen4-max` / `minimax-m3.1-flash`）
+  // 走的是 Anthropic Messages 协议，**不是** OpenAI 兼容 —— 本适配器当前只实现
+  // OpenAI 兼容（`POST /v1/chat/completions`）。⚠️ 实测它们**仍能**用 OpenAI
+  // 兼容端点调通（网关做了转换），故仍列在本表里；若将来上游改成严格分流，
+  // 需要为这两个单独接 Anthropic 协议。
+  { id: 'flash', name: '标准', contextWindow: 1_000_000, supportsImage: true, efforts: ['low', 'medium', 'high', 'max'] },
+  { id: 'advanced', name: '高级', contextWindow: 1_000_000, supportsImage: false, efforts: ['low', 'medium', 'high', 'max'] },
+  { id: 'pro', name: '旗舰', contextWindow: 1_000_000, supportsImage: true, efforts: ['low', 'medium', 'high', 'max'] },
   { id: 'qwen4-max', name: 'Qwen4-Max', contextWindow: 1_000_000, supportsImage: true, efforts: ['low', 'medium', 'high', 'max'] },
-  { id: 'kimi-k3.1-pro', name: 'Kimi K3.1 Pro', contextWindow: 1_000_000, supportsImage: true, efforts: ['low', 'medium', 'high', 'max'] },
+  { id: 'qwen3.8-max', name: 'Qwen3.8-Max', contextWindow: 1_000_000, supportsImage: true, efforts: ['low', 'medium', 'high', 'max'] },
+  { id: 'qwen3.8-flash', name: 'Qwen3.8-Flash', contextWindow: 1_000_000, supportsImage: true, efforts: ['low', 'medium', 'high', 'max'] },
+  { id: 'deepseek-flash', name: 'DeepSeek-V4.1-Flash', contextWindow: 1_000_000, supportsImage: false, efforts: ['low', 'medium', 'high', 'max'] },
+  { id: 'glm-5.3', name: 'GLM-5.3', contextWindow: 1_000_000, supportsImage: false, efforts: ['low', 'medium', 'high', 'max'] },
+  { id: 'glm-5.3-flash', name: 'GLM-5.3-Flash', contextWindow: 1_000_000, supportsImage: true, efforts: ['low', 'medium', 'high', 'max'] },
+  { id: 'kimi-k3.1-pro', name: 'Kimi-K3.1-Pro', contextWindow: 1_000_000, supportsImage: true, efforts: ['low', 'medium', 'high', 'max'] },
+  { id: 'minimax-m3.1-flash', name: 'MiniMax-M3.1-Flash', contextWindow: 1_000_000, supportsImage: true, efforts: ['low', 'medium', 'high', 'max'] },
 ]
+
+/**
+ * 解析上游 `/api/chat-modes` 的响应 → 本适配器的模型表。
+ *
+ * ## ⚠️ 这是**远端目录**，优先于静态兜底表
+ *
+ * `qwenwork-adapter.ts` 每次 `listModels` 会先尝试远端，失败才用兜底表
+ * ⇒ 上游加模型时**不需要改代码**（这修复了旧注释里登记的「静态表必然腐坏」缺陷）。
+ *
+ * @param body      `/api/chat-modes` 的 JSON。
+ * @param fallback  远端没有任何可用条目时用它（**不得**返回空 —— 空表会让
+ *                   `provider.status` 的 `models.total` 恒 0，整个 provider
+ *                   被误显示成「已关闭」，那是本仓 `qiniu-product.ts` 记录过的坑）。
+ */
+export function parseQwenworkChatModes(
+  body: unknown,
+  fallback: readonly QwenworkFallbackModel[] = QWENWORK_INTL_FALLBACK_MODELS,
+): readonly QwenworkFallbackModel[] {
+  if (typeof body !== 'object' || body === null) return fallback
+  const group = (body as Record<string, unknown>).qwork
+  if (!Array.isArray(group)) return fallback
+  const models: QwenworkFallbackModel[] = []
+  for (const raw of group) {
+    if (typeof raw !== 'object' || raw === null) continue
+    const item = raw as Record<string, unknown>
+    // ⚠️ `enable: false` 的条目**跳过**：上游已下架，列出来只会让用户选了报错。
+    if (item.enable === false) continue
+    const id = typeof item.key === 'string' ? item.key.trim() : ''
+    if (id.length === 0) continue
+    const name = qwenworkDisplayName(item)
+    // ⚠️ 上游给的是 `max_input_tokens`（不是 contextWindow 那个名字）。
+    const contextWindow = typeof item.max_input_tokens === 'number' && item.max_input_tokens > 0
+      ? item.max_input_tokens
+      : 1_000_000
+    // ⚠️ `is_vl` 是**上游权威声明**，不要用「我觉得能不能收图」覆盖它。
+    const supportsImage = item.is_vl === true
+    models.push({ id, name, contextWindow, supportsImage, efforts: QWENWORK_INTL_EFFORTS })
+  }
+  return models.length > 0 ? models : fallback
+}
+
+/** 从 `i18n.display_name` 里取显示名（中文优先，回落英文，再回落 key）。 */
+function qwenworkDisplayName(item: Record<string, unknown>): string {
+  const i18n = typeof item.i18n === 'object' && item.i18n !== null
+    ? (item.i18n as Record<string, unknown>)
+    : undefined
+  const names = typeof i18n?.display_name === 'object' && i18n.display_name !== null
+    ? (i18n.display_name as Record<string, unknown>)
+    : undefined
+  for (const lang of ['zh', 'en']) {
+    const value = names?.[lang]
+    if (typeof value === 'string' && value.trim().length > 0) return value.trim()
+  }
+  return typeof item.key === 'string' ? item.key : '?'
+}
+
+/** 思考档位（四档实测生效，见 `QwenworkFallbackModel.efforts` 的文档）。 */
+export const QWENWORK_INTL_EFFORTS: readonly string[] = ['low', 'medium', 'high', 'max']
 
 /** 该模型是否为兜底表里登记过的。 */
 export function isKnownQwenworkModel(id: string): boolean {

@@ -272,7 +272,7 @@ describe('从 registry 派生的能力表与既有断言逐条相等', () => {
     expect(Object.isFrozen(PROVIDER_REGISTRY), 'registry 数组应冻结').toBe(true)
   })
 
-  it('permanentLock 恰好是 15 家（officeace 2026-10-12、astudio/minimax/minimaxintl/qoder/qodercn/autoclaw/autoclawintl 2026-10-2x、magicrew/magicrewintl 2026-11-01 加入）', () => {
+  it('permanentLock 恰好是 16 家（officeace 2026-10-12、astudio/minimax/minimaxintl/qoder/qodercn/autoclaw/autoclawintl 2026-10-2x、magicrew/magicrewintl 2026-11-01 加入）', () => {
     const locked = PROVIDER_REGISTRY.filter((d) => d.permanentLock === true)
       .map((d) => d.id).sort()
     // ⚠️ qoder / qodercn 2026-10-20 加入（用户要求补齐三档分档 + 永久锁）。判据见
@@ -302,7 +302,7 @@ describe('从 registry 派生的能力表与既有断言逐条相等', () => {
     expect(locked).toEqual([
       'astudio', 'autoclaw', 'autoclawintl', 'buddy', 'lobsterai', 'loomy',
       'magicrew', 'magicrewintl', 'minimax', 'minimaxintl', 'officeace', 'qoder',
-      'qodercn', 'trae', 'workbuddy',
+      'qodercn', 'qwenworkintl', 'trae', 'workbuddy',
     ])
   })
 

@@ -95,26 +95,55 @@ describe('产品配置', () => {
     }
   })
 
-  it('模型表恰好 9 条，且都是实测 200 的 id', () => {
-    expect(QWENWORK_INTL_FALLBACK_MODELS).toHaveLength(9)
+  /**
+   * ★★ **兜底表必须与上游 `/api/chat-modes` 的真实目录逐条对齐**。
+   *
+   * ⚠️ 2026-11-22 用 ego-browser 打开 qwenwork.ai/app 后发现真实是 **11 条**，
+   * 而我先前只写了 9 条，且有三处错：
+   *
+   * | 错法 | 真相 |
+   * |---|---|
+   * | 写了 `deepseek-v4-pro` | **不存在**（那是早期手填测试被接受的野名字）|
+   * | `pro` 标 `supportsImage: false` | 上游 `is_vl: true` ⇒ **收图** |
+   * | 漏了 `qwen3.8-flash` / `minimax-m3.1-flash` | 两个都在目录里 |
+   *
+   * ⇒ 这条断言按上游顺序逐条锁死，改表必须同时改这里。
+   */
+  it('★★ 模型表恰好 11 条，与上游 /api/chat-modes 逐条对齐', () => {
+    expect(QWENWORK_INTL_FALLBACK_MODELS).toHaveLength(11)
     const ids = QWENWORK_INTL_FALLBACK_MODELS.map((m) => m.id)
     expect(ids).toEqual([
-      'flash', 'glm-5.3-flash', 'deepseek-flash',
-      'pro', 'glm-5.3', 'deepseek-v4-pro', 'qwen3.8-max', 'qwen4-max', 'kimi-k3.1-pro',
+      'flash', 'advanced', 'pro', 'qwen4-max', 'qwen3.8-max', 'qwen3.8-flash',
+      'deepseek-flash', 'glm-5.3', 'glm-5.3-flash', 'kimi-k3.1-pro', 'minimax-m3.1-flash',
     ])
+    // ⚠️ 反向：`deepseek-v4-pro` 不在上游目录里，绝不能出现。
+    expect(ids, 'deepseek-v4-pro 是野名字').not.toContain('deepseek-v4-pro')
   })
 
   /**
    * ⚠️ **实测只有 7 个模型收图**：`pro` 与 `glm-5.3` 收图回 400。
    * 整表一律 true 会让用户看到「支持图片」而实际每次必失败。
    */
-  it('★ supportsImage 逐模型正确（pro / glm-5.3 必须 false）', () => {
+  /**
+   * ★ **`supportsImage` 必须等于上游的 `is_vl`**（那是权威声明，不是我猜的）。
+   *
+   * ⚠️ 先前的错：把 `pro` 标成 `false`（上游是 `true`）。
+   * 根因是我早期用「发一条带图请求看会不会 400」来判，
+   * 而 `pro` 那次 400 的**真实原因不是图片**（是另一处参数问题）。
+   * ⇒ **有权威声明时就不要用自己的探测结论覆盖它**。
+   */
+  it('★★ supportsImage 等于上游 is_vl（不收图的是 advanced / deepseek-flash / glm-5.3）', () => {
     const byId = new Map(QWENWORK_INTL_FALLBACK_MODELS.map((m) => [m.id, m]))
-    expect(byId.get('pro')?.supportsImage).toBe(false)
-    expect(byId.get('glm-5.3')?.supportsImage).toBe(false)
-    for (const id of ['flash', 'glm-5.3-flash', 'deepseek-flash', 'deepseek-v4-pro', 'qwen3.8-max', 'qwen4-max', 'kimi-k3.1-pro']) {
-      expect(byId.get(id)?.supportsImage, `${id} 实测能收图`).toBe(true)
+    // 上游 is_vl: false 的三个
+    for (const id of ['advanced', 'deepseek-flash', 'glm-5.3']) {
+      expect(byId.get(id)?.supportsImage, `${id} 上游 is_vl=false`).toBe(false)
     }
+    // 其余都是 is_vl: true
+    for (const id of ['flash', 'pro', 'qwen4-max', 'qwen3.8-max', 'qwen3.8-flash', 'glm-5.3-flash', 'kimi-k3.1-pro', 'minimax-m3.1-flash']) {
+      expect(byId.get(id)?.supportsImage, `${id} 上游 is_vl=true`).toBe(true)
+    }
+    // ⚠️ 反向：pro 必须收图（旧表错标成 false）。
+    expect(byId.get('pro')?.supportsImage).not.toBe(false)
   })
 
   /**
@@ -636,11 +665,11 @@ describe('适配器契约', () => {
       mintTicket: async () => ({ token: 'maas', baseUrl: 'https://api1.qwenwork.ai', expiresAtMs: Date.now() + 3_600_000 }),
     })
 
-  it('listAllModels 同步返回 9 条（绝不 async —— 消费者不 await）', () => {
+  it('listAllModels 同步返回 11 条（绝不 async —— 消费者不 await）', () => {
     const adapter = makeAdapter()
     const models = adapter.listAllModels()
     expect(Array.isArray(models)).toBe(true)
-    expect(models).toHaveLength(9)
+    expect(models).toHaveLength(11)
   })
 
   it('resolveModel 对已知模型给出窗口 / 档位 / 模态', async () => {

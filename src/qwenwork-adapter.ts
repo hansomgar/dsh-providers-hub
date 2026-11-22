@@ -76,7 +76,9 @@ import {
   QWENWORK_INTL,
   QWENWORK_INTL_FALLBACK_MODELS,
   classifyQwenworkError,
+  parseQwenworkChatModes,
   type QwenworkErrorInfo,
+  type QwenworkFallbackModel,
   type QwenworkProduct,
 } from './qwenwork-product.js'
 import {
@@ -156,6 +158,23 @@ const RETRY_AFTER_CAP_MS = 30 * 60_000
 const RATE_LIMIT_BASE_MS = 60_000
 
 /**
+ * 远端目录缓存 TTL（成功）。
+ *
+ * ⚠️ 10 分钟：上游加模型是低频事件，而 `listModels` 会被面板频繁调用
+ * （每次开设置页、每次刷新）⇒ 不缓存等于每点一次打一次上游。
+ */
+const REMOTE_CATALOG_TTL_MS = 10 * 60_000
+/**
+ * 远端目录缓存 TTL（**失败**）。
+ *
+ * ⚠️ 60 秒：不缓存失败的话，上游不可达时每次开面板都白等一个超时，
+ * 界面明显卡顿；缓存太久的失败又会让「网络恢复后仍显示旧目录」。
+ */
+const REMOTE_FAILURE_TTL_MS = 60_000
+/** 远端目录请求超时。⚠️ 必须设：桌面版到外部域名的 fetch 可能永不 settle。 */
+const REMOTE_CATALOG_TIMEOUT_MS = 10_000
+
+/**
  * 把一次失败折算成「何时可以再试」。
  *
  * ⚠️ **额度类不给次日零点**：国际站的额度**每天 00:00（UTC+8）刷新**，
@@ -221,6 +240,15 @@ function fallbackEntries(): readonly QwenworkCatalogEntry[] {
 export class QwenworkAdapter extends LlmAdapter {
   private readonly product: QwenworkProduct
   private readonly skeletonCatalog: ModelCatalog
+  /**
+   * 远端目录缓存。
+   *
+   * ⚠️ 成功与失败**都**缓存，只是 TTL 不同：成功 10 分钟、失败 60 秒。
+   * 不缓存失败的话，上游不可达时每次开面板都要白等一个超时。
+   */
+  private remoteCatalog: { models: readonly QwenworkFallbackModel[]; at: number; ttl: number } | undefined
+  /** 单飞：并发调用共享同一次远端请求（与 `mintTicket` 同款理由）。 */
+  private remoteInflight: Promise<readonly QwenworkFallbackModel[]> | undefined
 
   constructor(private readonly options: QwenworkAdapterOptions) {
     super()
@@ -244,14 +272,70 @@ export class QwenworkAdapter extends LlmAdapter {
   /**
    * 异步读目录（骨架入口）。
    *
-   * ⚠️ 本家**没有可用的远端目录端点**（`/algo/api/v2/model/list` 实测 403、
-   * `/v1/models` 实测 404），故这里恒返回兜底表。保留这个方法的形状是为了
-   * 与骨架契约一致（并在**没有槽位**时返回 `[]` 隐藏整个 provider）。
+   * ## ⚠️⚠️ **优先远端 `/api/chat-modes`，失败才回退静态表**
+   *
+   * 2026-11-22 浏览器实测发现该端点（此前误以为「国际站没有可读的目录端点」）。
+   * 走远端后**上游加模型不需要改代码**，这修复了旧实现里登记的
+   * 「静态兜底表必然腐坏」缺陷。
+   *
+   * ⚠️ **远端失败必须回退兜底表，不能返回空**：
+   * 空表 ⇒ `provider.status` 的 `models.total` 恒 0 ⇒ 整个 provider 被误显示成
+   * 「已关闭」（`qiniu-product.ts` 模块头记录过这个坑）。
+   *
+   * ⚠️ **没有槽位时仍返回 `[]`**：那是「本 provider 一个账号都没登录」的正常
+   * 门控，与「远端失败」是两件事，不能混。
    */
   private async loadCatalogEntries(): Promise<readonly CatalogEntry[]> {
     const slots = await this.options.slots()
     if (slots.length === 0) return []
-    return fallbackEntries().map((m) => toCatalogEntry(m))
+    const models = await this.loadRemoteModels(slots[0]!)
+    return models.map((m) => toCatalogEntry(m))
+  }
+
+  /**
+   * 拉远端模型目录（带缓存 + 单飞）。
+   *
+   * ⚠️ **缓存**：`listModels` 在面板上被频繁调用（每次开设置页、每次刷新），
+   * 不缓存会每点一次都打一次上游。
+   *
+   * ⚠️ **失败也要缓存**（`REMOTE_FAILURE_TTL_MS` 短得多）：否则上游不可达时
+   * 每次调用都白等一个超时，面板会明显卡顿。
+   */
+  private async loadRemoteModels(slot: QwenworkSlot): Promise<readonly QwenworkFallbackModel[]> {
+    const now = Date.now()
+    const cached = this.remoteCatalog
+    if (cached !== undefined && now - cached.at < cached.ttl) return cached.models
+    if (this.remoteInflight !== undefined) return await this.remoteInflight
+
+    const task = (async (): Promise<readonly QwenworkFallbackModel[]> => {
+      try {
+        const response = await fetch(`${this.product.webBase}${this.product.chatModesPath}`, {
+          headers: qwenworkHeaders(slot.accessToken, 'application/json'),
+          signal: AbortSignal.timeout(REMOTE_CATALOG_TIMEOUT_MS),
+        })
+        if (!response.ok) throw new Error(`HTTP ${response.status}`)
+        const body = await response.json()
+        const models = parseQwenworkChatModes(body)
+        this.remoteCatalog = { models, at: Date.now(), ttl: REMOTE_CATALOG_TTL_MS }
+        return models
+      } catch (error) {
+        // ⚠️ **静默回退**：目录拉不到不是用户的错，报错只会让面板显示一条
+        //    「目录加载失败」而模型其实还能用（兜底表在）。
+        this.options.warn?.(
+          `[qwenworkintl] 远端模型目录拉取失败，回退兜底表：${String(error)}`,
+        )
+        this.remoteCatalog = {
+          models: fallbackEntries(),
+          at: Date.now(),
+          ttl: REMOTE_FAILURE_TTL_MS,
+        }
+        return fallbackEntries()
+      } finally {
+        this.remoteInflight = undefined
+      }
+    })()
+    this.remoteInflight = task
+    return await task
   }
 
   /** **同步**全量目录（`listAllModels()` 用）。 */

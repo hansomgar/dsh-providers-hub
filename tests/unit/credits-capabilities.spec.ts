@@ -747,6 +747,7 @@ describe('永久积分锁定能力', () => {
     //    ⇒ 三档齐；且已接上 `createCredentialResolver` 的 `kind: 'buddy'` 选号
     //    （锁定才真能拦）。两站**各占一项**（账号不互通）。
     MAGICREW.id, MAGICREW_INTL.id,
+    'qwenworkintl',
   ]
   const UNSUPPORTED = [
     'codearts', 'cline', 'raccoon',

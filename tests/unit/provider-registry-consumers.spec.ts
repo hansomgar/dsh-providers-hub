@@ -77,10 +77,11 @@ describe('usesExpiryWindow：永久积分锁定的 windowDays 取决于 registry
     //    `permanentLock` + `balance` 接线）。⚠️ 两站各占一项。
     // ⚠️ magicrew / magicrewintl 2026-11-01 加入：两站**同日同时**登记两个字段
     //    （半残形态正是这里防的：锁定按钮在、分档行却不渲染）。两站各占一项。
+    // ⚠️ 2026-11-22 加 qwenworkintl：两字段**同时**登记（半残形态正是这里防的）。
     expect(viaWindow).toEqual([
       'astudio', 'autoclaw', 'autoclawintl', 'buddy', 'lobsterai',
       'magicrew', 'magicrewintl', 'minimax', 'minimaxintl', 'officeace', 'qoder',
-      'qodercn', 'trae', 'workbuddy',
+      'qodercn', 'qwenworkintl', 'trae', 'workbuddy',
     ])
     expect(locked).toEqual([...viaWindow, 'loomy'].sort())
   })

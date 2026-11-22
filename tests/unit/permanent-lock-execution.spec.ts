@@ -221,6 +221,21 @@ const LOCK_EXECUTION_PATHS: Record<
     drives: 'magicrewLockedError',
     anchor: "lockedError: magicrewLockedError('MagiCrew (国际版)', 'magicrewintl'),",
   },
+  // ⚠️ 千问办公国际站（2026-11-22，用户要求「按 buddy 系一样完整实现」）：
+  //    与 buddy 系**同一条**执行路径（`pickBuddyAccount`），但报错文案是本家自己的
+  //    `qwenworkLockedError`（四态分流 + 窗口天数入参）。
+  //
+  //    ⚠️ 本家的 `drives` 与 `anchor` **都不是 `lockedError:`** 那一行 ——
+  //    本家没有走 `createCredentialResolver` 的 `balance` 字段（那需要自家
+  //    CredentialResolver），而是在适配器的 `slots()` 闭包里直接调
+  //    `pickBuddyAccount`。故锚点打在**真正决定锁定是否生效**的那一行上：
+  //    `allowPermanent: !pool.permanentLocked(...)`。
+  qwenworkintl: {
+    module: 'src/index.ts',
+    spec: 'tests/unit/qwenwork-lock-wiring.spec.ts',
+    drives: 'qwenworkLockedError',
+    anchor: 'allowPermanent: !pool.permanentLocked(QWENWORK_INTL.id)',
+  },
 }
 
 describe('★ 普查：凡登记 permanentLock 的渠道，都必须有一条执行路径', () => {
