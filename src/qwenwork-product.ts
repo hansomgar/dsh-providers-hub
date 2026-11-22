@@ -276,57 +276,67 @@ export interface QwenworkFallbackModel {
 }
 
 /**
- * 思考档位（**逐模型实测**，不是全模型一律四档）。
+ * 思考档位（**统一五档**，2026-11-22 用户决定）。
  *
- * ## ⚠️⚠️ 关键结论：**档位不是全模型都生效**
+ * ```
+ * ['low', 'medium', 'high', 'xhigh', 'max']
+ * ```
  *
- * 2026-11-22 真机实测（每档采样 2~3 次，取 `reasoning_tokens` 均值；
- * 判据是 `max / low ≥ 1.5` 才算「档位真的起作用」）：
+ * ## ⚠️ 为什么是这五档（对齐 DSH 全仓的强度序）
  *
- * | 模型 | low | max | 倍数 | 判定 |
- * |---|---|---|---|---|
- * | `pro` | 11 | 642 | **×58.4** | ✅ |
- * | `glm-5.3-flash` | 19 | 374 | **×19.7** | ✅ |
- * | `glm-5.3` | 33 | 471 | **×14.3** | ✅ |
- * | `qwen4-max` | 65 | 222 | ×3.4 | ✅ |
- * | `minimax-m3.1-flash` | 62 | 113 | ×1.8 | ✅ |
- * | `qwen3.8-max` | 198 | 307 | ×1.6 | ✅ |
- * | **`flash`** | 234 | 225 | ×0.96 | ❌ 无区分 |
- * | **`deepseek-flash`** | 160 | 150 | ×0.94 | ❌ 无区分（甚至反向）|
- * | **`kimi-k3.1-pro`** | 316 | 322 | ×1.02 | ❌ 无区分 |
- * | **`qwen3.8-flash`** | 209 | 257 | ×1.2 | ❌ 无区分 |
+ * DSH 自家与上游的档位词表是同一套强度序（`REASONING_EFFORT_RANK`）：
  *
- * ## ⇒ 为什么无效的模型**不声明档位**
+ * ```
+ * none < minimal < low < medium < high < xhigh < max
+ * ```
  *
- * ⚠️ 上游**不校验**这个字段（发 `xhigh` / `none` / 乱写都回 200）⇒ 声明了
- * 无效档位不会报错，只会给用户一个**「选了没反应」的菜单**。
- * 本仓纪律：宁可少一个档位选择器，也不要让它变成装饰。
+ * 三处旁证（见 `llm-adapter.ts` 的注释）：
+ * - DSH 自家 `dsh-llm-deepseek` 声明 `[off, low, high, max]`；
+ * - DSH 自家 `dsh-llm-pi-ai` 的 `THINKING_LEVELS` 是
+ *   `[off, minimal, low, medium, high, xhigh, max]`；
+ * - 本仓 `zcode-upstream.ts` 的 `orderReasoningLevels` 把上游乱序
+ *   排成 `none → minimal → low → … → max`。
  *
- * ⚠️ 顺带修正一个我自己的错误结论：先前用 `glm-5.3` 单模型测出
- * 「四档全部生效、max 是 low 的 10 倍」就写成了**全模型共享常量**
- * —— 那只对 `glm-5.3` 成立。用户 2026-11-22 质疑后逐模型复测才发现
- * `flash` / `deepseek-flash` / `kimi` / `qwen3.8-flash` 四个**完全无效**。
+ * ⇒ 本家取其中的 **low / medium / high / xhigh / max** 五档：
+ * 不含 `none`（那是「关闭思考」，DSH 有独立语义，且本家上游不认）
+ * 与 `minimal`（本家实测无区分，多一档只是噪声）。
+ *
+ * ## ⚠️ 顺序必须是强度序（弱 → 强）
+ *
+ * DSH 把它当**展示顺序**（`dsh-llm` 类型注释 `adapter-preferred display
+ * order`），官方客户端直接 `map` 不排序 ⇒ 顺序反了会变成「左强右弱」
+ * （本仓 `protocol-wire.md` 记录过这个不变式）。
+ *
+ * ## ⚠️ 上游不校验这个字段
+ *
+ * 实测发 `xhigh` / `none` / 乱写都回 200 ⇒ 档位名写错**不会报错**，
+ * 只会静默无效。故这五档是按「DSH 标准词表」选的，而不是从上游读的
+ * （上游 `/api/chat-modes` 的 15 个字段里**没有任何档位信息**）。
+ *
+ * ⚠️ 我 2026-11-22 的逐模型实测显示部分模型（`flash` / `deepseek-flash` /
+ * `kimi-k3.1-pro` / `qwen3.8-flash`）的 `max` 与 `low` 无区分。
+ * 用户决定**仍统一声明五档** —— 理由是：
+ * ① 上游可能按账号档位/灰度逐步开放，静态判据会过期；
+ * ② 少一个档位菜单的代价（用户以为「这模型不支持思考」）比多一个
+ * 菜单（选了效果不明显）更大；
+ * ③ 与网页行为一致优先于局部实测。
  */
-export const QWENWORK_EFFORTS_SUPPORTED: readonly string[] = ['low', 'medium', 'high', 'max']
+export const QWENWORK_EFFORTS: readonly string[] = ['low', 'medium', 'high', 'xhigh', 'max']
 
 /**
- * **逐模型档位表**：只有这里列出的模型才声明 `efforts`。
+ * **全部模型统一五档**（见 `QWENWORK_EFFORTS` 的文档）。
  *
- * ⚠️ 不在表里的模型 ⇒ `toCatalogEntry` 不下发 `reasoning` 字段
- * ⇒ 模型选择器不显示档位菜单（而不是显示一个无效菜单）。
+ * ⚠️ 原先这里是**逐模型表**（只给实测有效的 6 个声明档位），
+ * 2026-11-22 用户决定改为全模型统一 —— 理由见上。
+ *
+ * ⚠️ **`advanced` 也在这五档之内**：它在 OpenAI 兼容端点恒 400
+ * （与档位无关，见兜底表里的长注释），档位声明对它的可用性无影响。
  */
-export const QWENWORK_MODEL_EFFORTS: Readonly<Record<string, readonly string[]>> = {
-  // ✅ 实测档位有效（max/low ≥ 1.5）
-  pro: QWENWORK_EFFORTS_SUPPORTED,
-  'glm-5.3': QWENWORK_EFFORTS_SUPPORTED,
-  'glm-5.3-flash': QWENWORK_EFFORTS_SUPPORTED,
-  'qwen4-max': QWENWORK_EFFORTS_SUPPORTED,
-  'qwen3.8-max': QWENWORK_EFFORTS_SUPPORTED,
-  'minimax-m3.1-flash': QWENWORK_EFFORTS_SUPPORTED,
-  // ❌ 实测无区分（flash / deepseek-flash / kimi-k3.1-pro / qwen3.8-flash）
-  //    刻意**不列**在这里 ⇒ 不声明档位。
-  // ⚠️ `advanced` 不在表里：它在兼容端点恒 400（见兜底表里的注释），
-  //    档位对它能用与否无意义。
+export function qwenworkEffortsOf(modelId: string): readonly string[] {
+  // ⚠️ 函数形态（而不是 `Record` 查表）是为了让「未知模型」也有五档：
+  //    远端将来新增模型时不需要先补表才有档位菜单。
+  void modelId
+  return QWENWORK_EFFORTS
 }
 
 /**
@@ -458,7 +468,7 @@ export const QWENWORK_INTL_FALLBACK_MODELS: readonly QwenworkFallbackModel[] = [
   // OpenAI 兼容（`POST /v1/chat/completions`）。⚠️ 实测它们**仍能**用 OpenAI
   // 兼容端点调通（网关做了转换），故仍列在本表里；若将来上游改成严格分流，
   // 需要为这两个单独接 Anthropic 协议。
-  { id: 'flash', name: '标准', priceFactor: 0.1, contextWindow: 1_000_000, supportsImage: true },
+  { id: 'flash', name: '标准', priceFactor: 0.1, contextWindow: 1_000_000, supportsImage: true, efforts: QWENWORK_EFFORTS },
   /**
    * ⚠️⚠️ **`advanced`（网页显示「Pro」）在 OpenAI 兼容端点上恒 400 —— 保留但不可用**
    *
@@ -497,16 +507,16 @@ export const QWENWORK_INTL_FALLBACK_MODELS: readonly QwenworkFallbackModel[] = [
    * ⚠️ **不要**为了「让它能用」而给它编一个别的 model 名（如 `qwork-pro` /
    * `Standard` / `Flagship`）—— 实测这些名字**全部 400**（2026-11-22 逐个试过）。
    */
-  { id: 'advanced', name: '高级', priceFactor: 1, contextWindow: 1_000_000, supportsImage: true },
-  { id: 'pro', name: '旗舰', priceFactor: 1, contextWindow: 1_000_000, supportsImage: true, efforts: QWENWORK_EFFORTS_SUPPORTED },
-  { id: 'qwen4-max', name: 'Qwen4-Max', priceFactor: 1.4, contextWindow: 1_000_000, supportsImage: true, efforts: QWENWORK_EFFORTS_SUPPORTED },
-  { id: 'qwen3.8-max', name: 'Qwen3.8-Max', priceFactor: 1.9, contextWindow: 1_000_000, supportsImage: true, efforts: QWENWORK_EFFORTS_SUPPORTED },
-  { id: 'qwen3.8-flash', name: 'Qwen3.8-Flash', priceFactor: 0.1, contextWindow: 1_000_000, supportsImage: true },
-  { id: 'deepseek-flash', name: 'DeepSeek-V4.1-Flash', priceFactor: 0.2, contextWindow: 1_000_000, supportsImage: true },
-  { id: 'glm-5.3', name: 'GLM-5.3', priceFactor: 1.3, contextWindow: 1_000_000, supportsImage: true, efforts: QWENWORK_EFFORTS_SUPPORTED },
-  { id: 'glm-5.3-flash', name: 'GLM-5.3-Flash', priceFactor: 0.2, contextWindow: 1_000_000, supportsImage: true, efforts: QWENWORK_EFFORTS_SUPPORTED },
-  { id: 'kimi-k3.1-pro', name: 'Kimi-K3.1-Pro', priceFactor: 2.6, contextWindow: 1_000_000, supportsImage: true },
-  { id: 'minimax-m3.1-flash', name: 'MiniMax-M3.1-Flash', priceFactor: 0.2, contextWindow: 1_000_000, supportsImage: true, efforts: QWENWORK_EFFORTS_SUPPORTED },
+  { id: 'advanced', name: '高级', priceFactor: 1, contextWindow: 1_000_000, supportsImage: true, efforts: QWENWORK_EFFORTS },
+  { id: 'pro', name: '旗舰', priceFactor: 1, contextWindow: 1_000_000, supportsImage: true, efforts: QWENWORK_EFFORTS },
+  { id: 'qwen4-max', name: 'Qwen4-Max', priceFactor: 1.4, contextWindow: 1_000_000, supportsImage: true, efforts: QWENWORK_EFFORTS },
+  { id: 'qwen3.8-max', name: 'Qwen3.8-Max', priceFactor: 1.9, contextWindow: 1_000_000, supportsImage: true, efforts: QWENWORK_EFFORTS },
+  { id: 'qwen3.8-flash', name: 'Qwen3.8-Flash', priceFactor: 0.1, contextWindow: 1_000_000, supportsImage: true, efforts: QWENWORK_EFFORTS },
+  { id: 'deepseek-flash', name: 'DeepSeek-V4.1-Flash', priceFactor: 0.2, contextWindow: 1_000_000, supportsImage: true, efforts: QWENWORK_EFFORTS },
+  { id: 'glm-5.3', name: 'GLM-5.3', priceFactor: 1.3, contextWindow: 1_000_000, supportsImage: true, efforts: QWENWORK_EFFORTS },
+  { id: 'glm-5.3-flash', name: 'GLM-5.3-Flash', priceFactor: 0.2, contextWindow: 1_000_000, supportsImage: true, efforts: QWENWORK_EFFORTS },
+  { id: 'kimi-k3.1-pro', name: 'Kimi-K3.1-Pro', priceFactor: 2.6, contextWindow: 1_000_000, supportsImage: true, efforts: QWENWORK_EFFORTS },
+  { id: 'minimax-m3.1-flash', name: 'MiniMax-M3.1-Flash', priceFactor: 0.2, contextWindow: 1_000_000, supportsImage: true, efforts: QWENWORK_EFFORTS },
 ]
 
 /**
@@ -568,7 +578,7 @@ export function parseQwenworkChatModes(
       ...priceFactor === undefined ? {} : { priceFactor },
       contextWindow,
       supportsImage,
-      efforts: QWENWORK_MODEL_EFFORTS[id],
+      efforts: qwenworkEffortsOf(id),
     })
   }
   return models.length > 0 ? models : fallback

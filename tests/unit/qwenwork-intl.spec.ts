@@ -19,6 +19,7 @@ import {
   displayNameOfQwenworkModel,
   isKnownQwenworkModel,
   parseQwenworkChatModes,
+  qwenworkEffortsOf,
 } from '../../src/qwenwork-product.js'
 import {
   decodeQwenworkJwt,
@@ -242,58 +243,56 @@ describe('产品配置', () => {
    * DSH 把它当展示顺序，铺成横向轴时顺序反了会变成「左强右弱」）。
    */
   /**
-   * ★★★ **档位不是全模型都生效**（2026-11-22 逐模型实测，用户质疑后复测）。
+   * ★★★ **全部模型统一五档**（2026-11-22 用户决定）。
    *
-   * ## 我先前的错误
+   * ```
+   * ['low', 'medium', 'high', 'xhigh', 'max']
+   * ```
    *
-   * 只测了 `glm-5.3` 一个模型（low 42 → max 444，×10.6），就写成
-   * **全模型共享常量** —— 那只对 glm-5.3 成立。
+   * ## 为什么是这五档
    *
-   * ## 逐模型复测结果（每档采样 2~3 次，判据 max/low ≥ 1.5）
+   * 对齐 DSH 全仓的强度序（`REASONING_EFFORT_RANK`）：
    *
-   * | 模型 | low | max | 倍数 | 判定 |
-   * |---|---|---|---|---|
-   * | `pro` | 11 | 642 | ×58.4 | ✅ |
-   * | `glm-5.3-flash` | 19 | 374 | ×19.7 | ✅ |
-   * | `glm-5.3` | 33 | 471 | ×14.3 | ✅ |
-   * | `qwen4-max` | 65 | 222 | ×3.4 | ✅ |
-   * | `minimax-m3.1-flash` | 62 | 113 | ×1.8 | ✅ |
-   * | `qwen3.8-max` | 198 | 307 | ×1.6 | ✅ |
-   * | `flash` | 234 | 225 | ×0.96 | ❌ |
-   * | `deepseek-flash` | 160 | 150 | ×0.94 | ❌ |
-   * | `kimi-k3.1-pro` | 316 | 322 | ×1.02 | ❌ |
-   * | `qwen3.8-flash` | 209 | 257 | ×1.2 | ❌ |
+   * ```
+   * none < minimal < low < medium < high < xhigh < max
+   * ```
    *
-   * ⚠️ 上游**不校验**这个字段（乱写也回 200）⇒ 给无效模型声明档位
-   * 不会报错，只会给用户一个「选了没反应」的菜单（本仓纪律不许）。
+   * 取这五档：不含 `none`（那是「关闭思考」，DSH 有独立语义）、
+   * 不含 `minimal`（实测无区分，多一档只是噪声）。
+   *
+   * ⚠️ 我 2026-11-22 的逐模型实测显示 `flash` / `deepseek-flash` /
+   * `kimi-k3.1-pro` / `qwen3.8-flash` 的 `max` 与 `low` 无区分。
+   * 用户决定**仍统一声明五档**：上游可能按账号/灰度逐步开放，
+   * 而「少一个档位菜单」的代价比「多一个菜单」更大。
    */
-  it('★★★ 只有实测有效的 6 个模型声明档位，其余不声明', () => {
-    const EXPECTED_WITH_EFFORTS = [
-      'glm-5.3', 'glm-5.3-flash', 'minimax-m3.1-flash',
-      'pro', 'qwen3.8-max', 'qwen4-max',
+  it('★★★ 全部 11 个模型统一五档（low/medium/high/xhigh/max）', () => {
+    const EXPECTED = [
+      'low', 'medium', 'high', 'xhigh', 'max',
     ]
     for (const m of QWENWORK_INTL_FALLBACK_MODELS) {
-      if (EXPECTED_WITH_EFFORTS.includes(m.id)) {
-        expect(m.efforts, m.id + ' 实测有效，必须声明档位').toEqual(['low', 'medium', 'high', 'max'])
-        // ⚠️ 强度序：max 最后、low 最前（DSH 按此顺序展示）。
-        expect(m.efforts?.[0]).toBe('low')
-        expect(m.efforts?.[m.efforts.length - 1]).toBe('max')
-      } else {
-        expect(m.efforts, m.id + ' 实测无区分，绝不能声明档位（会变成无效菜单）').toBeUndefined()
-      }
+      expect(m.efforts, m.id + ' 必须声明五档').toEqual(EXPECTED)
+      // ⚠️ 强度序：low 最前、max 最后。
+      expect(m.efforts?.[0]).toBe('low')
+      expect(m.efforts?.[m.efforts.length - 1]).toBe('max')
+      // ⚠️ 必须含 xhigh（新增档）。
+      expect(m.efforts).toContain('xhigh')
+    }
+    // ⚠️ 反向：不得出现已弃用的 minimal / none。
+    for (const m of QWENWORK_INTL_FALLBACK_MODELS) {
+      expect(m.efforts).not.toContain('minimal')
+      expect(m.efforts).not.toContain('none')
     }
   })
 
   /**
-   * ★★ **反向**：4 个实测无效的模型必须**不**声明档位。
+   * ★★ **未知模型也给五档**（`qwenworkEffortsOf` 是函数而不是查表）。
    *
-   * 这条单独列出，因为「漏声明」和「错声明」是两个方向的缺陷。
+   * 理由：远端将来新增模型时，不该因为「表里没有」就没有档位菜单。
    */
-  it('★★ flash / deepseek-flash / kimi / qwen3.8-flash 不声明档位', () => {
-    const byId = new Map(QWENWORK_INTL_FALLBACK_MODELS.map((m) => [m.id, m]))
-    for (const id of ['flash', 'deepseek-flash', 'kimi-k3.1-pro', 'qwen3.8-flash']) {
-      expect(byId.get(id)?.efforts, id + ' 实测无区分').toBeUndefined()
-    }
+  it('★★ 未知模型 id 也返回五档', () => {
+    expect(qwenworkEffortsOf('brand-new-model-xyz')).toEqual([
+      'low', 'medium', 'high', 'xhigh', 'max',
+    ])
   })
 })
 
@@ -945,7 +944,7 @@ describe('适配器契约', () => {
     const adapter = makeAdapter()
     const resolved = await adapter.resolveModel('qwenworkintl', 'glm-5.3')
     expect(resolved.context?.contextWindow).toBe(1_000_000)
-    expect(resolved.reasoning?.efforts.map((e) => e.id)).toEqual(['low', 'medium', 'high', 'max'])
+    expect(resolved.reasoning?.efforts.map((e) => e.id)).toEqual(['low', 'medium', 'high', 'xhigh', 'max'])
     // ⚠️ glm-5.3 实测不收图。
     // ⚠️ 现在一律按支持图片处理（用户 2026-11-22 决定）。
     expect(resolved.inputModalities).toEqual(['text', 'image'])
