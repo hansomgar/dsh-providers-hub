@@ -586,7 +586,7 @@ dsh plugin --profile desktop add "file:E:\Data\data_dsh\2026\dsh-agent-proxy\dsh
 - 本分支通过 merge **`ae98f3d3`** 合入；开关在 **Jet Hub → 设置 → 登录授权**，默认**开**（= 改动前行为）。
 - 关：不自动开窗，授权链接复制到剪贴板并显示在账号面板里（带「复制链接」按钮）；
   宿主也不再开 CodeArts / OfficeAce 的无痕窗、不再开 Raccoon 授权页。
-- 文档：`docs/agent-notes/client-ui.md` **第 28 节**（两条腿 / CDP 渠道例外 / 设置弹窗 780×940）。
+- 文档：`docs/agent-notes/client-ui.md` **第 28 节**（两条腿 / CDP 渠道例外 / 设置弹窗 840×上限 940 + 参考档次窗口的明显边框）。
 - 验证：`tsc`（src + tests）全绿；新增/扩展 55 条用例全绿；PR worktree 全量
   **14990 passed / 7 failed**（全部为 `origin/master` 基线已知失败，见 §7 第 2 项）。
 - ⚠️ 构建后**由用户手动重启 DSH** 验收（本会话未重启）。
