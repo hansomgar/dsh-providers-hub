@@ -838,6 +838,79 @@ describe('RPC 的账号 id 派生', () => {
   })
 })
 
+describe('★★★ 倍率与徽标（用户报障：providers 列表也要显示倍率）', () => {
+  const makeAdapter = () => new QwenworkAdapter({
+    slots: async () => [{ id: 'x', accessToken: 'dummy' }],
+    mintTicket: async () => ({ token: 't', baseUrl: 'https://api1.qwenwork.ai', expiresAtMs: Date.now() + 3600000 }),
+  })
+
+  /**
+   * ★★★ **三处名称必须一致**（listAllModels / listModels / resolveModel）。
+   *
+   * ⚠️ 2026-11-22 用户报障「在 providers 的模型列表也展示倍率」——
+   * 根因是 listAllModels() 用了**裸名**（m.name），而 listModels() 走
+   * toCatalogEntry 带倍率 ⇒ 同一模型在设置页是「标准」、在选择器是「标准 · x0.1」。
+   */
+  it('★★★ listAllModels 的名字带倍率（不能是裸名）', () => {
+    const models = makeAdapter().listAllModels()
+    const flash = models.find((m) => m.id === 'flash')
+    expect(flash?.name, '必须带倍率').toBe('标准 · x0.1')
+    // ⚠️ 反向：绝不能是裸名。
+    expect(flash?.name).not.toBe('标准')
+    // 全部 11 条都必须带 x 后缀。
+    for (const m of models) {
+      expect(m.name, m.id + ' 必须带倍率').toMatch(/ · x[\d.]+$/)
+    }
+  })
+
+  it('★★★ resolveModel 的名字也带倍率（与 listAllModels 同源）', async () => {
+    const r = await makeAdapter().resolveModel('qwenworkintl', 'kimi-k3.1-pro')
+    expect(r.name).toBe('Kimi-K3.1-Pro · x2.6')
+  })
+
+  it('★★★ 三处名称逐条相等（防再次分叉）', async () => {
+    const a = makeAdapter()
+    const all = a.listAllModels()
+    for (const m of all) {
+      const resolved = await a.resolveModel('qwenworkintl', m.id)
+      expect(resolved.name, m.id + ' 的 resolveModel 名必须与 listAllModels 相同').toBe(m.name)
+    }
+  })
+
+  /**
+   * ★★ 徽标只在 listModels 上有渲染位置。
+   *
+   * 宿主 LlmModelInfo.badge 是唯一能画出「名字右侧胶囊」的字段；
+   * LlmResolvedModelInfo（resolveModel 的回包）**不带 badge** ——
+   * 宿主 normalizeModelInfo 逐字段白名单、明确丢弃它。
+   */
+  it('★★ 上游 is_new 的模型带「新」徽标，其余不带', () => {
+    const all = QWENWORK_INTL_FALLBACK_MODELS
+    const withNew = all.filter((m) => m.isNew === true).map((m) => m.id).sort()
+    // 上游实测 8 个 is_new: true（flash/advanced/pro 是 false）。
+    expect(withNew).toEqual([
+      'deepseek-flash', 'glm-5.3', 'glm-5.3-flash', 'kimi-k3.1-pro',
+      'minimax-m3.1-flash', 'qwen3.8-flash', 'qwen3.8-max', 'qwen4-max',
+    ])
+    // ⚠️ 反向：三个老模型不得带「新」徽标。
+    for (const id of ['flash', 'advanced', 'pro']) {
+      expect(all.find((m) => m.id === id)?.isNew, id + ' 不是新模型').not.toBe(true)
+    }
+  })
+
+  /**
+   * ★★ **上游不下发任何促销 ⇒ 绝不编造「限时免费」**（本仓红线）。
+   *
+   * 实测 11 条 price_factor 最低 0.1、**没有一条为 0**，也没有
+   * promotion/discount/promo 字段 ⇒ 做不出「限时免费」徽标。
+   */
+  it('★★ 所有模型都有非零倍率（上游无免费促销，不编造）', () => {
+    for (const m of QWENWORK_INTL_FALLBACK_MODELS) {
+      expect(m.priceFactor, m.id + ' 必须有倍率').toBeTypeOf('number')
+      expect(m.priceFactor, m.id + ' 倍率非 0（上游无免费模型）').toBeGreaterThan(0)
+    }
+  })
+})
 describe('适配器契约', () => {
   const makeAdapter = (slots = [{ id: 'qwenworkintl', accessToken: 'tok' }]) =>
     new QwenworkAdapter({

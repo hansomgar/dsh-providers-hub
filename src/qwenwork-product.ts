@@ -217,6 +217,13 @@ export interface QwenworkFallbackModel {
   /** 展示名（**不含倍率**；倍率由 `displayNameOfQwenworkModel` 拼上去）。 */
   name: string
   /**
+   * 上游 `is_new`：是否新上架。
+   *
+   * ⚠️ 这是本家**唯一**能画徽标的事实依据（上游不下发促销，
+   * 见 `toCatalogEntry` 的注释）⇒ 用来出「新」徽标。
+   */
+  isNew?: boolean
+  /**
    * **计费倍率**（上游 `price_factor`，远端下发）。
    *
    * ⚠️ 这是用户选型时最重要的信号（本家跨度 0.1 ~ 2.6，26 倍）⇒
@@ -435,14 +442,14 @@ export const QWENWORK_INTL_FALLBACK_MODELS: readonly QwenworkFallbackModel[] = [
   { id: 'flash', name: '标准', priceFactor: 0.1, icon: QWENWORK_MODEL_ICONS['flash'], contextWindow: 1_000_000, supportsImage: true, efforts: QWENWORK_INTL_EFFORTS },
   { id: 'advanced', name: '高级', priceFactor: 1, icon: QWENWORK_MODEL_ICONS['advanced'], contextWindow: 1_000_000, supportsImage: false, efforts: QWENWORK_INTL_EFFORTS },
   { id: 'pro', name: '旗舰', priceFactor: 1, icon: QWENWORK_MODEL_ICONS['pro'], contextWindow: 1_000_000, supportsImage: false, efforts: QWENWORK_INTL_EFFORTS },
-  { id: 'qwen4-max', name: 'Qwen4-Max', priceFactor: 1.4, icon: QWENWORK_MODEL_ICONS['qwen4-max'], contextWindow: 1_000_000, supportsImage: true, efforts: QWENWORK_INTL_EFFORTS },
-  { id: 'qwen3.8-max', name: 'Qwen3.8-Max', priceFactor: 1.9, icon: QWENWORK_MODEL_ICONS['qwen3.8-max'], contextWindow: 1_000_000, supportsImage: true, efforts: QWENWORK_INTL_EFFORTS },
-  { id: 'qwen3.8-flash', name: 'Qwen3.8-Flash', priceFactor: 0.1, icon: QWENWORK_MODEL_ICONS['qwen3.8-flash'], contextWindow: 1_000_000, supportsImage: true, efforts: QWENWORK_INTL_EFFORTS },
-  { id: 'deepseek-flash', name: 'DeepSeek-V4.1-Flash', priceFactor: 0.2, icon: QWENWORK_MODEL_ICONS['deepseek-flash'], contextWindow: 1_000_000, supportsImage: true, efforts: QWENWORK_INTL_EFFORTS },
-  { id: 'glm-5.3', name: 'GLM-5.3', priceFactor: 1.3, icon: QWENWORK_MODEL_ICONS['glm-5.3'], contextWindow: 1_000_000, supportsImage: false, efforts: QWENWORK_INTL_EFFORTS },
-  { id: 'glm-5.3-flash', name: 'GLM-5.3-Flash', priceFactor: 0.2, icon: QWENWORK_MODEL_ICONS['glm-5.3-flash'], contextWindow: 1_000_000, supportsImage: true, efforts: QWENWORK_INTL_EFFORTS },
-  { id: 'kimi-k3.1-pro', name: 'Kimi-K3.1-Pro', priceFactor: 2.6, icon: QWENWORK_MODEL_ICONS['kimi-k3.1-pro'], contextWindow: 1_000_000, supportsImage: true, efforts: QWENWORK_INTL_EFFORTS },
-  { id: 'minimax-m3.1-flash', name: 'MiniMax-M3.1-Flash', priceFactor: 0.2, icon: QWENWORK_MODEL_ICONS['minimax-m3.1-flash'], contextWindow: 1_000_000, supportsImage: true, efforts: QWENWORK_INTL_EFFORTS },
+  { id: 'qwen4-max', name: 'Qwen4-Max', isNew: true, priceFactor: 1.4, icon: QWENWORK_MODEL_ICONS['qwen4-max'], contextWindow: 1_000_000, supportsImage: true, efforts: QWENWORK_INTL_EFFORTS },
+  { id: 'qwen3.8-max', name: 'Qwen3.8-Max', isNew: true, priceFactor: 1.9, icon: QWENWORK_MODEL_ICONS['qwen3.8-max'], contextWindow: 1_000_000, supportsImage: true, efforts: QWENWORK_INTL_EFFORTS },
+  { id: 'qwen3.8-flash', name: 'Qwen3.8-Flash', isNew: true, priceFactor: 0.1, icon: QWENWORK_MODEL_ICONS['qwen3.8-flash'], contextWindow: 1_000_000, supportsImage: true, efforts: QWENWORK_INTL_EFFORTS },
+  { id: 'deepseek-flash', name: 'DeepSeek-V4.1-Flash', isNew: true, priceFactor: 0.2, icon: QWENWORK_MODEL_ICONS['deepseek-flash'], contextWindow: 1_000_000, supportsImage: true, efforts: QWENWORK_INTL_EFFORTS },
+  { id: 'glm-5.3', name: 'GLM-5.3', isNew: true, priceFactor: 1.3, icon: QWENWORK_MODEL_ICONS['glm-5.3'], contextWindow: 1_000_000, supportsImage: false, efforts: QWENWORK_INTL_EFFORTS },
+  { id: 'glm-5.3-flash', name: 'GLM-5.3-Flash', isNew: true, priceFactor: 0.2, icon: QWENWORK_MODEL_ICONS['glm-5.3-flash'], contextWindow: 1_000_000, supportsImage: true, efforts: QWENWORK_INTL_EFFORTS },
+  { id: 'kimi-k3.1-pro', name: 'Kimi-K3.1-Pro', isNew: true, priceFactor: 2.6, icon: QWENWORK_MODEL_ICONS['kimi-k3.1-pro'], contextWindow: 1_000_000, supportsImage: true, efforts: QWENWORK_INTL_EFFORTS },
+  { id: 'minimax-m3.1-flash', name: 'MiniMax-M3.1-Flash', isNew: true, priceFactor: 0.2, icon: QWENWORK_MODEL_ICONS['minimax-m3.1-flash'], contextWindow: 1_000_000, supportsImage: true, efforts: QWENWORK_INTL_EFFORTS },
 ]
 
 /**
@@ -502,9 +509,11 @@ export function parseQwenworkChatModes(
     const icon = typeof item.icon === 'string' && item.icon.trim().length > 0
       ? item.icon.trim()
       : QWENWORK_MODEL_ICONS[id]
+    const isNew = item.is_new === true
     models.push({
       id,
       name,
+      ...isNew ? { isNew: true } : {},
       ...priceFactor === undefined ? {} : { priceFactor },
       ...icon === undefined ? {} : { icon },
       contextWindow,

@@ -100,8 +100,15 @@ export interface QwenworkCatalogEntry {
   name: string
   /** 计费倍率（上游 `price_factor`），拼进展示名用。 */
   priceFactor?: number
-  /** 模型图标 URL（上游 `icon`）。 */
+  /**
+   * 模型图标 URL（上游 `icon`）。
+   *
+   * ⚠️ **DSH 没有渲染位置**（`LlmModelInfo` 全库无 icon/logo 字段）⇒ 仅留档，
+   * `toCatalogEntry` **不传**它（传了也是死字段）。
+   */
   icon?: string
+  /** 上游 `is_new`：是否新上架（用来画「新」徽标）。 */
+  isNew?: boolean
   contextWindow: number
   supportsImage: boolean
   efforts?: readonly string[]
@@ -218,8 +225,27 @@ function toCatalogEntry(m: QwenworkCatalogEntry): CatalogEntry {
      * 做法与 `accio-adapter.ts` 的 `displayNameOfAccioModel` 同款。
      */
     name: displayNameOfQwenworkModel(m),
-    // ⚠️ 图标：远端 `icon` 优先，兜底表也写了那批 URL。
-    ...m.icon === undefined ? {} : { icon: m.icon },
+    /**
+     * ⚠️ **不传 `icon`**（2026-11-22 用户澄清）：用户要的「图标」是模型名右边的
+     * **徽标**（如 CodeBuddy 那个绿色「限时免费」框），**不是模型 logo**。
+     * 上游给的那个 `img.alicdn.com` 24×24 SVG 在 DSH 的模型列表里**没有任何
+     * 渲染位置** —— `LlmModelInfo` 全库无 icon/logo 字段（宿主只透传
+     * `provider/id/name/description/inputModalities/badge`）。
+     * ⇒ 传了也是死字段，故移除（数据仍保留在兜底表里，备将来有位置再用）。
+     */
+    /**
+     * ⚠️ **徽标（`badge`）** —— 宿主 `LlmModelInfo.badge` 的**唯一**渲染位置是
+     * 模型选择器每行的**名字右侧**（`ModelSelect.tsx` 的 `placement: 'option'`），
+     * 渲成 `Tag` 胶囊。`tone: 'success'` = 绿字 + 10% 绿底（= 截图那种观感）。
+     *
+     * ⚠️ **本家上游不下发任何促销信息**（实测 11 条：`price_factor` 最低 0.1、
+     * 无一条为 0，也没有 `promotion`/`discount` 字段）⇒ **做不出「限时免费」**。
+     * 唯一有的事实性徽标是 `is_new: true`（8 个模型）⇒ 用它画「新」。
+     * ⚠️ 绝不为了凑出绿框而编造促销（本仓红线）。
+     */
+    ...m.isNew === true
+      ? { badge: { text: { en: 'New', zh: '新' }, tone: 'info' as const } }
+      : {},
     // ⚠️ 能力表缺失/未知时**一律回退 `['text']`**（硬约定：声明支持就必须真支持）。
     inputModalities: m.supportsImage
       ? (['text', 'image'] as const)
@@ -248,6 +274,7 @@ function fallbackEntries(): readonly QwenworkCatalogEntry[] {
   return QWENWORK_INTL_FALLBACK_MODELS.map((m) => ({
     id: m.id,
     name: m.name,
+    ...m.isNew === true ? { isNew: true } : {},
     ...m.priceFactor === undefined ? {} : { priceFactor: m.priceFactor },
     ...m.icon === undefined ? {} : { icon: m.icon },
     contextWindow: m.contextWindow,
@@ -374,9 +401,22 @@ export class QwenworkAdapter extends LlmAdapter {
    * ⚠️ **绝不能写成 async**：`jet-hub-rpc.ts` 的 `ModelCatalogSource` 接口是
    * 同步的且消费者**不 await**（`catalog = [...all]`），返回 Promise 会抛
    * `TypeError: all is not iterable`（minimax 的同款真实缺陷）。
+   *
+   * ⚠️⚠️ **`name` 必须走 `toCatalogEntry` 那条唯一转换点**（带倍率 + 徽标）。
+   *
+   * 原先这里直接 `{ id: m.id, name: m.name }` —— 用的是**裸名**
+   * ⇒ 设置页 / `provider.status` 那两处显示的是「标准」而模型选择器显示
+   * 「标准 · x0.1」，**同一模型两个名字**（2026-11-22 用户报障
+   * 「在 providers 的模型列表也展示倍率」）。
+   *
+   * ⚠️ 徽标**不在这里带**：本方法返回类型只有 `{id, name}`，
+   * 而徽标只在 `listModels` 的 `LlmModelInfo.badge` 上有渲染位置。
    */
   listAllModels(): readonly { id: string; name: string }[] {
-    return fallbackEntries().map((m) => ({ id: m.id, name: m.name }))
+    return fallbackEntries().map((m) => {
+      const entry = toCatalogEntry(m)
+      return { id: entry.id, name: entry.name }
+    })
   }
 
   /**
@@ -400,7 +440,13 @@ export class QwenworkAdapter extends LlmAdapter {
     const resolved: LlmResolvedModelInfo = {
       provider,
       id,
-      name: entry?.name ?? id,
+      /**
+       * ⚠️ **必须与 `listModels` 同源**（走 `toCatalogEntry` 的唯一转换点）：
+       * 否则「设置页显示裸名、选择器显示带倍率」= 同一模型两个名字。
+       * ⚠️ 但 `resolveModel` 的回包类型**不带 `badge`**（宿主
+       * `normalizeModelInfo` 逐字段白名单、明确丢弃 badge）⇒ 这里只取 name。
+       */
+      name: entry === undefined ? id : toCatalogEntry(entry).name,
       inputModalities: entry?.supportsImage === true
         ? (['text', 'image'] as const)
         : (['text'] as const),
