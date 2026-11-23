@@ -687,7 +687,54 @@ export function classifyQwenworkError(
   const detail = readableDetail(body)
   const lower = body.toLowerCase()
 
-  // ── 1. 上下文超限（必须最先判，见上）──
+  /**
+   * ── 0. **认证状态码优先**（2026-11-23 二轮审计修，🟡B-6）──
+   *
+   * ## 原实现的问题（实测）
+   *
+   * 「上下文超限」曾被排在**最前**，且判据含裸 `includes('context window')`。
+   * 于是只要响应体里出现这两个词，**任何状态码**都被判成超限：
+   *
+   * ```
+   * 401 + body 含 "context window"                 → context_window（应为 auth）
+   * 429 + "too many requests for this context window" → context_window（应为 rate_limit）
+   * ```
+   *
+   * 后果：真 401 不触发续期、不换号；真 429 不写冷却标记
+   * ⇒ 用户重发还是同一个号、还是失败。
+   *
+   * ## 判据
+   *
+   * **状态码是权威**：`401`/`403` 一律 auth，`402` 一律 quota，`429` 一律
+   * rate_limit/额度。只有**状态码不足以定性**时（200/400/422 等）才看 body 文案。
+   *
+   * ⚠️ 这与本仓既有不变式一致：「认证先于额度/限流」（宁可漏判额度，
+   * 不可误判成封号）—— 只是那条原本排在 context_window 之后，等于没生效。
+   */
+  if (status === 401 || status === 403) return { kind: 'auth', detail }
+  /**
+   * ⚠️ **429 也优先于 body 判据**（2026-11-23 二轮审计修，🟡B-6 的第二格）。
+   *
+   * 实测漏网：`429 + "too many requests for this context window"`
+   * 会被下面的 `context window` 子串判成**超限** ⇒ 不换号、不写冷却。
+   *
+   * ⚠️ 但**额度优先于限流**（`balance_insufficient` 也是 429）——
+   * 故这里只把「429 **且没有额度措辞**」判成 rate_limit，
+   * 有额度措辞的留给下面的 quota 段。
+   */
+  if (
+    status === 429
+    && !lower.includes('balance_insufficient')
+    && !lower.includes('insufficient_quota')
+    && !lower.includes('insufficient balance')
+    && !lower.includes('insufficient_credit')
+    && !lower.includes('quota exceeded')
+    && !lower.includes('out of credits')
+  ) {
+    return { kind: 'rate_limit', ...retryAfterMs === undefined ? {} : { retryAfterMs }, detail }
+  }
+
+  // ── 1. 上下文超限（状态码不冲突时，按体判）──
   if (
     lower.includes('context_length_exceeded')
     || lower.includes('context length exceeded')
@@ -700,16 +747,31 @@ export function classifyQwenworkError(
     return { kind: 'context_window', detail }
   }
 
-  // ── 2. 认证先于额度/限流（不变式：宁可漏判额度，不可误判成封号）──
-  if (status === 401 || status === 403) return { kind: 'auth', detail }
-
   // ── 3. 额度：必须认国际站的确切码，且它走 HTTP 429 ──
   // ⚠️ 这一段**必须在** rate_limit 之前：`balance_insufficient` 也是 429。
   if (
     lower.includes('balance_insufficient')
     || lower.includes('insufficient_quota')
     || lower.includes('insufficient balance')
-    || lower.includes('insufficient')
+    || lower.includes('insufficient_credit')
+    || lower.includes('quota exceeded')
+    || lower.includes('out of credits')
+    /**
+     * ⚠️⚠️ **裸 `insufficient` 已删除**（2026-11-23 二轮审计修，🟡B-6）。
+     *
+     * 实测它会把三类完全无关的失败判成「额度用尽」：
+     *
+     * ```
+     * 400 + "insufficient permissions for model" → quota（应为 bad_request）
+     * 500 + "insufficient capacity"              → quota（应为 server）
+     * 422 + "insufficient"                       → quota
+     * ```
+     *
+     * 后果：用户看到「额度用尽」⇒ 可能去**解锁长期积分**（不可撤回），
+     * 而真因是权限不足 / 上游故障。
+     *
+     * ⇒ 只认**明确的额度措辞**（上面那几条），不认形容词本身。
+     */
     || status === 402
   ) {
     return { kind: 'quota', ...retryAfterMs === undefined ? {} : { retryAfterMs }, detail }

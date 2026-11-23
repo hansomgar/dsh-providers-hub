@@ -253,10 +253,43 @@ export class QwenworkIntlAuth extends Service {
     })
     const text = await response.text().catch(() => '')
     if (!response.ok) {
-      throw new Error(
+      /**
+       * ⚠️⚠️ **必须带上 `status` 与 `body`**（2026-11-23 二轮审计修，🔴B-3）。
+       *
+       * ## 原实现的问题（裸 `Error`，实测）
+       *
+       * 抛的是 `new Error('…（HTTP 401）…')` —— **没有 `status` 字段**。
+       * 于是 `stream()` 的 catch 里无法用 `classifyQwenworkError(status, body)`
+       * 分类，只能落到最后一个 `else` ⇒ 判成 `transport`：
+       *
+       * ```
+       * 换票 401 归类     → transport   （应为 auth）
+       * refresh 调用次数  → 0           （应为 1）
+       * 抛出的 code      → undefined   （应为 AUTH）
+       * ```
+       *
+       * ⇒ ① 续期腿一次都不触发；
+       *   ② 抛的不是 `LlmError`，`code` 为 `undefined` ⇒ 宿主拿不到 `AUTH`，
+       *      客户端**不会**渲染「重新登录」那句指路文案。
+       *
+       * ## ⚠️ 为什么这条路径是「第一现场」
+       *
+       * 登录 token 只有 **15 天**，而 MaaS 票据要**每个请求**先换。
+       * 所以令牌过期时**第一个**撞墙的几乎总是换票，而不是推理。
+       * 漏了这一格 ⇒ 自愈链在最高频的真实场景下从未生效。
+       *
+       * ## 修法
+       *
+       * 抛一个带 `status` + `body` 的错误对象（`streamVia` 的 catch 会读它们去分类）；
+       * 同时保留原始文案（`Error` 的 message 里仍有 HTTP 码与上游原文）。
+       */
+      const error = new Error(
         `qwenworkintl: 换取推理票据失败（HTTP ${response.status}）——`
         + `${text.slice(0, 200) || '（上游未返回详情）'}`,
-      )
+      ) as Error & { status?: number; body?: string }
+      error.status = response.status
+      error.body = text
+      throw error
     }
     let parsed: unknown
     try {

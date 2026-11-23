@@ -230,7 +230,7 @@ import { qiniuModelsUrl, qiniuHeaders, type QiniuCredential } from './qiniu.js'
 //    协议是 OpenAI 兼容，但**推理要先换 MaaS 票据**（两段式），见
 //    `src/qwenwork-product.ts` 的模块头。
 import { QwenworkIntlAuth } from './qwenwork-auth.js'
-import { QwenworkAdapter, registerQwenworkLlm } from './qwenwork-adapter.js'
+import { QwenworkAdapter, registerQwenworkLlm, type QwenworkSlot } from './qwenwork-adapter.js'
 import { QWENWORK_INTL, type QwenworkProduct } from './qwenwork-product.js'
 // ⚠️ 「锁定长期积分」的**执行路径**：余额分档选号 + 按原因分流的报错文案。
 //    没有这两个 import 就只剩一个空按钮（见 `qwenwork-lock.ts` 模块头）。
@@ -5048,6 +5048,154 @@ export function apply(ctx: Context): void {
       product,
     ),
   })
+  /**
+   * ⚠️ **具名函数而不是内联箭头**：`slots` 与 `fetchSlots` 要共用同一份选号逻辑，
+   * 内联两遍会是「同一语义两套判据」（本仓红线）。
+   */
+  const slotsFor = async (modelId?: string, sessionId?: string): Promise<readonly QwenworkSlot[]> => {
+    const entries = await pool.listAccounts(QWENWORK_INTL.id)
+    /**
+     * ⚠️ 先按「启用 + 账号级封禁 + 模型限流」筛候选（与其余 provider 同一判据）。
+     *
+     * ⚠️⚠️ **账号级封禁必须单独判**（2026-11-23 补，真实漏接线）：
+     * `credential-resolver.ts` 里那套候选筛选有**两条独立**的排除腿——
+     * ① 账号级封禁（`isPolicyBlockedAccount`，上游以「违规」为由封了该号）；
+     * ② 逐模型限流（`modelRateLimits`）。
+     * 两者**刻意分开**（`credential-resolver.ts` 的注释逐字写了「对抗审计 E8
+     * 实测的形态」）：封禁是**整号**不可用、与模型无关，混进限流判据会
+     * 让「换个模型就能用」的错觉成立。
+     *
+     * 漏判的后果：被上游封禁的号**仍会被选中**，每次请求都撞上游拒绝，
+     * 且被误分类成别的错误（用户完全看不出是封号）。
+     */
+    const now = Date.now()
+    const candidates = entries.filter((entry) => {
+      if (!entry.enabled) return false
+      // ⚠️ 账号级封禁（整号不可用，与模型无关）。⚠️ 该函数只收 `entry`
+      //    （内部用 `isValidResetAtMs` 判有效期），**不要**多传 `now`。
+      if (isPolicyBlockedAccount(entry)) return false
+      // ⚠️ 模型级限流：`modelId` 缺省时**不查**（目录路径刻意不传 ——
+      //    传了会让被限流的账号把整个目录一起拖空）。
+      if (modelId !== undefined && modelId.length > 0) {
+        const resetAt = entry.modelRateLimits?.[modelId]
+        if (typeof resetAt === 'number' && resetAt > now) return false
+      }
+      return true
+    })
+    if (candidates.length === 0) {
+      /**
+       * ⚠️⚠️ **候选为空时必须先区分「全被限流」与「真的没账号」**
+       * （2026-11-23 补，真实漏接线，IKJOZ9 的同型形态）。
+       *
+       * 基线各家都接了 `throwIfAllAccountsRateLimited`（trae / workbuddy /
+       * qoder / magicrew …）。漏了它，本家在「所有账号对该模型都在限流中」
+       * 时会一路落到适配器抛 `MISSING_CREDENTIAL`，文案是
+       * 「没有可用账号。请在 Jet Hub 点『登录』」—— **完全错误的归因**：
+       * 账号好得很，只是等几分钟就解禁（解禁时刻早就写在 `modelRateLimits` 里）。
+       *
+       * 用户会去重登一个本来没问题的号，做完仍然报错，且看不出自己白做了一轮。
+       *
+       * ⚠️ 只在**请求路径**（有 `modelId`）判：目录路径拿不到模型上下文，
+       * 那里抛错会让整个 provider 的模型列表变成一条报错文案。
+       */
+      if (modelId !== undefined && modelId.length > 0) {
+        throwIfAllAccountsRateLimited(QWENWORK_INTL, modelId)
+      }
+      return []
+    }
+    /**
+     * ★★★ **轮换起点的四个入参**（2026-11-23 补，真实缺陷修复）。
+     *
+     * ## 症状
+     *
+     * 用户在 Jet Hub 面板给本家选了「轮换起点」（比如指定用第 3 个号），
+     * 但**完全不起作用** —— 永远从池里第一个号开始。
+     *
+     * ## 根因
+     *
+     * 本家的选号是在**这个 `slots()` 闭包里**直接调 `pickBuddyAccount`，
+     * 而「轮换起点」的参数是 `credential-resolver.ts` 的 buddy 分支
+     * （L611-657）里读池并传下去的。我照抄了调用形态却**漏了这四个字段**
+     * ⇒ `pickBuddyAccount` 拿不到起点 ⇒ 静默回落默认第一个号。
+     *
+     * ⚠️ 这**不是**「起点功能坏了」，而是本家**从未接线**。
+     * `credential-resolver.ts` 里那四个字段的注释逐字写了漏传的后果
+     *（「只传 id 不传档位 ⇒ 永远走 S5 ⇒ 静默不生效且不会有任何报错」）。
+     *
+     * ## 四个字段各自的作用（缺一不可）
+     *
+     * | 字段 | 作用 | 漏了会怎样 |
+     * |---|---|---|
+     * | `rotationStartId` | 本会话选定的起点账号 id | 起点完全不生效 |
+     * | `rotationStartTier` | 起点**选定那一刻**的档位快照 | 老数据静默走 S5（「重选过起点却还是先烧自己的」）|
+     * | `enabledAccountIds` | **未过滤**的池序（定位基准） | 起点被限流/封禁时静默回落第一个号 |
+     * | `strictManualOrder` | 严格手动顺序开关 | 用户打开后仍然按积分档位排 |
+     *
+     * ⚠️ `sessionId` 缺省（目录路径）时 `preferredRotationFor` 返回
+     * `undefined` ⇒ 四个字段全不传 ⇒ 行为与改动前逐字节相同
+     *（这条是本功能唯一的回归面）。
+     */
+    const rotationStartId = sessionId === undefined
+      ? undefined
+      : pool.preferredRotationFor?.(QWENWORK_INTL.id, sessionId)
+    const rotationStartTier = rotationStartId === undefined
+      ? undefined
+      : pool.rotationStartTierFor?.(QWENWORK_INTL.id, sessionId)
+    const enabledAccountIds = rotationStartId === undefined
+      ? undefined
+      : pool
+          .listAccountsByProvider(QWENWORK_INTL.id)
+          .filter((a) => a.enabled)
+          .map((a) => a.id)
+    const picked = await pickBuddyAccount<QwenworkCredential>(
+      qwenworkintlBalanceSelector,
+      candidates.map((entry) => ({ id: entry.id, credentialRef: entry.credentialRef })),
+      {
+        // ★ 锁定状态：`false` ⇒ 长期额度档被排除。
+        allowPermanent: !pool.permanentLocked(QWENWORK_INTL.id),
+        resolveCredential: (refName) => qwenworkintl.currentCredential(refName),
+        /**
+         * ⚠️ **目录路径（`modelId === undefined`）查不到余额时降级放行**：
+         * 目录不该因为一次网络抖动而清空（否则用户一个模型都选不了）。
+         * 请求路径则**不降级** —— 那里必须严守锁定语义。
+         */
+        degradeOnUnknown: modelId === undefined,
+        // ⚠️ **每次现读**（面板可随时切换），且未实现时视为关闭。
+        strictManualOrder: pool.strictManualOrder?.(QWENWORK_INTL.id) === true,
+        ...(rotationStartId === undefined ? {} : { rotationStartId }),
+        ...(rotationStartTier === undefined ? {} : { rotationStartTier }),
+        ...(enabledAccountIds === undefined ? {} : { enabledAccountIds }),
+      },
+    )
+    if (picked.kind === 'account') {
+      return [{ id: picked.account.id, accessToken: picked.credential.access_token }]
+    }
+    /**
+     * ⚠️ **目录路径：选号失败时退回「全部候选」而不是抛错。**
+     *
+     * 理由：`slots()` 也被 `loadCatalogEntries` 调用，那里只要「有没有账号」
+     * 这个信号 —— 抛错会让整个 provider 的模型列表变成一条报错文案
+     *（`magicrew` 真机踩过：余额接口被网关拒绝 ⇒ 模型全没了）。
+     *
+     * ⚠️ 但这**不会**绕过锁定：目录路径拿到的 slot 只用于「列模型」，
+     * 不发起推理；真正发送时走 `modelId !== undefined` 那条，那里严格拦截。
+     */
+    if (modelId === undefined) {
+      const fallback = await Promise.all(candidates.map(async (entry) => {
+        const credential = await qwenworkintl.currentCredential(entry.credentialRef)
+        return credential === undefined
+          ? undefined
+          : { id: entry.id, accessToken: credential.access_token }
+      }))
+      return fallback.filter((s): s is { id: string; accessToken: string } => s !== undefined)
+    }
+    // 请求路径：抛错（绝不回落，否则锁定无效）。
+    throw qwenworkLockedError(QWENWORK_INTL.displayName, QWENWORK_INTL.id, resolveCreditWindow(
+      QWENWORK_INTL.id,
+      safeCreditWindowReader(pool),
+    ).windowDays)(picked.reason ?? { kind: 'no-candidates' })
+  }
+
   const qwenworkintlAdapter = registerQwenworkLlm(ctx, {
     // 单凭据回退 ref：池里没有该 provider 账号时用它（与其余 provider 同约定）。
     credentialRef: credentialRef(QWENWORK_INTL.defaultCredentialRef),
@@ -5070,149 +5218,12 @@ export function apply(ctx: Context): void {
      * ⚠️ `modelId` 缺省（目录路径）时**仍走分档**：目录不该因余额查不到而空，
      * 故那条路径用 `degradeOnUnknown` 语义（查不到就放行）。
      */
-    slots: async (modelId?: string, sessionId?: string) => {
-      const entries = await pool.listAccounts(QWENWORK_INTL.id)
-      /**
-       * ⚠️ 先按「启用 + 账号级封禁 + 模型限流」筛候选（与其余 provider 同一判据）。
-       *
-       * ⚠️⚠️ **账号级封禁必须单独判**（2026-11-23 补，真实漏接线）：
-       * `credential-resolver.ts` 里那套候选筛选有**两条独立**的排除腿——
-       * ① 账号级封禁（`isPolicyBlockedAccount`，上游以「违规」为由封了该号）；
-       * ② 逐模型限流（`modelRateLimits`）。
-       * 两者**刻意分开**（`credential-resolver.ts` 的注释逐字写了「对抗审计 E8
-       * 实测的形态」）：封禁是**整号**不可用、与模型无关，混进限流判据会
-       * 让「换个模型就能用」的错觉成立。
-       *
-       * 漏判的后果：被上游封禁的号**仍会被选中**，每次请求都撞上游拒绝，
-       * 且被误分类成别的错误（用户完全看不出是封号）。
-       */
-      const now = Date.now()
-      const candidates = entries.filter((entry) => {
-        if (!entry.enabled) return false
-        // ⚠️ 账号级封禁（整号不可用，与模型无关）。⚠️ 该函数只收 `entry`
-        //    （内部用 `isValidResetAtMs` 判有效期），**不要**多传 `now`。
-        if (isPolicyBlockedAccount(entry)) return false
-        // ⚠️ 模型级限流：`modelId` 缺省时**不查**（目录路径刻意不传 ——
-        //    传了会让被限流的账号把整个目录一起拖空）。
-        if (modelId !== undefined && modelId.length > 0) {
-          const resetAt = entry.modelRateLimits?.[modelId]
-          if (typeof resetAt === 'number' && resetAt > now) return false
-        }
-        return true
-      })
-      if (candidates.length === 0) {
-        /**
-         * ⚠️⚠️ **候选为空时必须先区分「全被限流」与「真的没账号」**
-         * （2026-11-23 补，真实漏接线，IKJOZ9 的同型形态）。
-         *
-         * 基线各家都接了 `throwIfAllAccountsRateLimited`（trae / workbuddy /
-         * qoder / magicrew …）。漏了它，本家在「所有账号对该模型都在限流中」
-         * 时会一路落到适配器抛 `MISSING_CREDENTIAL`，文案是
-         * 「没有可用账号。请在 Jet Hub 点『登录』」—— **完全错误的归因**：
-         * 账号好得很，只是等几分钟就解禁（解禁时刻早就写在 `modelRateLimits` 里）。
-         *
-         * 用户会去重登一个本来没问题的号，做完仍然报错，且看不出自己白做了一轮。
-         *
-         * ⚠️ 只在**请求路径**（有 `modelId`）判：目录路径拿不到模型上下文，
-         * 那里抛错会让整个 provider 的模型列表变成一条报错文案。
-         */
-        if (modelId !== undefined && modelId.length > 0) {
-          throwIfAllAccountsRateLimited(QWENWORK_INTL, modelId)
-        }
-        return []
-      }
-      /**
-       * ★★★ **轮换起点的四个入参**（2026-11-23 补，真实缺陷修复）。
-       *
-       * ## 症状
-       *
-       * 用户在 Jet Hub 面板给本家选了「轮换起点」（比如指定用第 3 个号），
-       * 但**完全不起作用** —— 永远从池里第一个号开始。
-       *
-       * ## 根因
-       *
-       * 本家的选号是在**这个 `slots()` 闭包里**直接调 `pickBuddyAccount`，
-       * 而「轮换起点」的参数是 `credential-resolver.ts` 的 buddy 分支
-       * （L611-657）里读池并传下去的。我照抄了调用形态却**漏了这四个字段**
-       * ⇒ `pickBuddyAccount` 拿不到起点 ⇒ 静默回落默认第一个号。
-       *
-       * ⚠️ 这**不是**「起点功能坏了」，而是本家**从未接线**。
-       * `credential-resolver.ts` 里那四个字段的注释逐字写了漏传的后果
-       *（「只传 id 不传档位 ⇒ 永远走 S5 ⇒ 静默不生效且不会有任何报错」）。
-       *
-       * ## 四个字段各自的作用（缺一不可）
-       *
-       * | 字段 | 作用 | 漏了会怎样 |
-       * |---|---|---|
-       * | `rotationStartId` | 本会话选定的起点账号 id | 起点完全不生效 |
-       * | `rotationStartTier` | 起点**选定那一刻**的档位快照 | 老数据静默走 S5（「重选过起点却还是先烧自己的」）|
-       * | `enabledAccountIds` | **未过滤**的池序（定位基准） | 起点被限流/封禁时静默回落第一个号 |
-       * | `strictManualOrder` | 严格手动顺序开关 | 用户打开后仍然按积分档位排 |
-       *
-       * ⚠️ `sessionId` 缺省（目录路径）时 `preferredRotationFor` 返回
-       * `undefined` ⇒ 四个字段全不传 ⇒ 行为与改动前逐字节相同
-       *（这条是本功能唯一的回归面）。
-       */
-      const rotationStartId = sessionId === undefined
-        ? undefined
-        : pool.preferredRotationFor?.(QWENWORK_INTL.id, sessionId)
-      const rotationStartTier = rotationStartId === undefined
-        ? undefined
-        : pool.rotationStartTierFor?.(QWENWORK_INTL.id, sessionId)
-      const enabledAccountIds = rotationStartId === undefined
-        ? undefined
-        : pool
-            .listAccountsByProvider(QWENWORK_INTL.id)
-            .filter((a) => a.enabled)
-            .map((a) => a.id)
-      const picked = await pickBuddyAccount<QwenworkCredential>(
-        qwenworkintlBalanceSelector,
-        candidates.map((entry) => ({ id: entry.id, credentialRef: entry.credentialRef })),
-        {
-          // ★ 锁定状态：`false` ⇒ 长期额度档被排除。
-          allowPermanent: !pool.permanentLocked(QWENWORK_INTL.id),
-          resolveCredential: (refName) => qwenworkintl.currentCredential(refName),
-          /**
-           * ⚠️ **目录路径（`modelId === undefined`）查不到余额时降级放行**：
-           * 目录不该因为一次网络抖动而清空（否则用户一个模型都选不了）。
-           * 请求路径则**不降级** —— 那里必须严守锁定语义。
-           */
-          degradeOnUnknown: modelId === undefined,
-          // ⚠️ **每次现读**（面板可随时切换），且未实现时视为关闭。
-          strictManualOrder: pool.strictManualOrder?.(QWENWORK_INTL.id) === true,
-          ...(rotationStartId === undefined ? {} : { rotationStartId }),
-          ...(rotationStartTier === undefined ? {} : { rotationStartTier }),
-          ...(enabledAccountIds === undefined ? {} : { enabledAccountIds }),
-        },
-      )
-      if (picked.kind === 'account') {
-        return [{ id: picked.account.id, accessToken: picked.credential.access_token }]
-      }
-      /**
-       * ⚠️ **目录路径：选号失败时退回「全部候选」而不是抛错。**
-       *
-       * 理由：`slots()` 也被 `loadCatalogEntries` 调用，那里只要「有没有账号」
-       * 这个信号 —— 抛错会让整个 provider 的模型列表变成一条报错文案
-       *（`magicrew` 真机踩过：余额接口被网关拒绝 ⇒ 模型全没了）。
-       *
-       * ⚠️ 但这**不会**绕过锁定：目录路径拿到的 slot 只用于「列模型」，
-       * 不发起推理；真正发送时走 `modelId !== undefined` 那条，那里严格拦截。
-       */
-      if (modelId === undefined) {
-        const fallback = await Promise.all(candidates.map(async (entry) => {
-          const credential = await qwenworkintl.currentCredential(entry.credentialRef)
-          return credential === undefined
-            ? undefined
-            : { id: entry.id, accessToken: credential.access_token }
-        }))
-        return fallback.filter((s): s is { id: string; accessToken: string } => s !== undefined)
-      }
-      // 请求路径：抛错（绝不回落，否则锁定无效）。
-      throw qwenworkLockedError(QWENWORK_INTL.displayName, QWENWORK_INTL.id, resolveCreditWindow(
-        QWENWORK_INTL.id,
-        safeCreditWindowReader(pool),
-      ).windowDays)(picked.reason ?? { kind: 'no-candidates' })
-    },
+
+    /**
+     * ⚠️ **引用具名函数**（与下面的 `fetchSlots` 共用同一份选号逻辑 ——
+     * 内联两遍会是「同一语义两套判据」，本仓红线）。
+     */
+    slots: slotsFor,
     accountPool: pool,
     product: QWENWORK_INTL,
     // ⚠️⚠️ **MaaS 票据的换与缓存**（本家的核心差异，见 QwenworkIntlAuth 模块头）。
@@ -5238,16 +5249,46 @@ export function apply(ctx: Context): void {
      * 而所有自愈（定时器 / 积分 / 面板按钮）都**不在推理路径上**
      * ⇒ 只能干等下一轮定时器或自己回面板点。
      */
-    refresh: async () => {
-      const available = await pool.getAvailableAccount(QWENWORK_INTL.id, '')
-      if (available) {
-        await qwenworkintl.refreshAccountCredential(
-          available.entry.credentialRef,
-          pool,
-          available.entry.id,
-        )
+    /**
+     * ★ **推理 401 时按需续期**（2026-11-23 审计 P2 补；二轮审计修 🔴B-2）。
+     *
+     * ## ⚠️⚠️ **必须续「刚失败的那个号」，不能取池里第一个**
+     *
+     * 原实现是 `refresh: async () => { pool.getAvailableAccount(id, '') … }`
+     * —— 它不知道失败的是谁，只能拿池里第一个可用账号。
+     * 实测（轮换起点选 acc-2、`slots()` 返回 acc-2）：
+     *
+     * ```
+     * 失败的是 acc-2，但 refresh 续的是 acc-1
+     * ⇒ acc-2 一次都没救到，用户仍看到 401
+     * ⇒ 而且 acc-1 的 refresh_token 被**白轮换一次**（一次性凭证）
+     * ```
+     *
+     * ⇒ 现在由适配器把 `slotId` 传进来，本层按 id 精确取那条账号。
+     *
+     * ⚠️ 取不到（账号已被删 / 池里没有）时**静默返回**：
+     * 续期是尽力而为，不该因为「找不到"而变成一条新错误。
+     */
+    refresh: async (slotId: string) => {
+      const entry = pool.findAccount(slotId)
+      if (entry === undefined) {
+        // ⚠️ 账号已不在池里（用户删了 / 轮换中）⇒ 无从续期，交给上层报 401 原文。
+        return
       }
+      await qwenworkintl.refreshAccountCredential(entry.credentialRef, pool, entry.id)
     },
+    /**
+     * ★★★ **重新取槽快照**（2026-11-23 二轮审计补，修 🔴B-1）。
+     *
+     * 与 `slots` 是**同一个函数**的引用 —— 存在的唯一理由是让适配器在
+     * 「续期成功后」能重新读一次凭据库。不接这一条时，重发用的是
+     * `stream()` 开始前那份快照里的**旧 accessToken**
+     *（实测：库已改成 NEW-TOKEN，换票仍用 OLD-TOKEN ⇒ 再 401）。
+     *
+     * ⚠️ 直接复用上面那个 `slots` 闭包会让代码里出现第二份「选号逻辑」——
+     * 那正是本仓红线（同一语义两套判据）。故用**具名函数 + 两处引用**。
+     */
+    fetchSlots: async (modelId?: string, sessionId?: string) => await slotsFor(modelId, sessionId),
     // 图片走 `readImage` 单一路径，逐模型按兜底表的 `supportsImage` 声明。
     // ⚠️ 实测 `pro` / `glm-5.3` **不收图**（400），其余 7 个正常 ⇒ 逐条声明，
     //    绝不整表一律 true（本仓硬约定：声明支持就必须真支持）。

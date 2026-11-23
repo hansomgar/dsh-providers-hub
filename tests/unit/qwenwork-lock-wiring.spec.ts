@@ -181,7 +181,7 @@ describe('★★★ 轮换起点接线（2026-11-23 真实缺陷：从未接线�
     expect(
       indexCode,
       'slots 必须收 sessionId，否则 preferredRotationFor 拿不到起点',
-    ).toMatch(/slots:\s*async\s*\(modelId\?:\s*string,\s*sessionId\?:\s*string\)/)
+    ).toMatch(/const slotsFor = async \(modelId\?: string, sessionId\?: string\)/)
   })
 
   it('★★★ slots() 必须真的读 pool.preferredRotationFor', () => {
@@ -300,10 +300,11 @@ describe('★★ 2026-11-23 审计 P2/P3 收尾', () => {
       'utf8',
     )
     const adapterCode = codeOnly(adapterSource)
-    expect(adapterCode, 'options 类型必须有 refresh').toMatch(/readonly refresh\?: \(\) => Promise<void>/)
+    expect(adapterCode, 'options 类型必须有 refresh 且接收 slotId').toMatch(/readonly refresh\?: \(slotId: string\) => Promise<void>/)
     // ⚠️ 必须真的在 auth 分支里调（只声明不调用 = 死字段）。
-    expect(adapterCode, 'auth 分支必须调用 this.options.refresh()').toMatch(
-      /this\.options\.refresh !== undefined[\s\S]{0,200}?await this\.options\.refresh\(\)/,
+    expect(adapterCode, 'auth 分支必须调用 this.options.refresh(slot.id)').toMatch(
+      // ⚠️ 必须**传 slot.id**（B-2）：不传时接线层只能取池里第一个号，会续错账号。
+      /this\.options\.refresh !== undefined[\s\S]{0,300}?await this\.options\.refresh\(slot\.id\)/,
     )
     // ⚠️ 每槽只试一次（refresh 是账号级副作用，反复调会重复轮换 refresh_token）。
     expect(adapterCode, '必须用 refreshed 集合去重').toMatch(/refreshed\.has\(slot\.id\)/)
@@ -321,7 +322,7 @@ describe('★★ 2026-11-23 审计 P2/P3 收尾', () => {
     //    且必须带上 `pool,` 与 `available.entry.id` 这两个参数锚点
     //    （证明走的是**账号级**续期而非单凭据 `service.refresh()`）。
     expect(indexCode).toMatch(
-      /refresh: async \(\) => \{[\s\S]{0,400}?qwenworkintl\.refreshAccountCredential\([\s\S]{0,200}?available\.entry\.credentialRef,\s*pool,\s*available\.entry\.id/,
+      /refresh: async \(slotId: string\) => \{[\s\S]{0,400}?pool\.findAccount\(slotId\)[\s\S]{0,300}?qwenworkintl\.refreshAccountCredential\(entry\.credentialRef, pool, entry\.id\)/,
     )
   })
 
@@ -736,3 +737,287 @@ describe('★★★ 2026-11-23 终审：两条真缺陷的行为级守卫', () =
     expect(msg, '汇总文案必须附上游原文（含 trace_id）').toContain('TRACE-MULTI-42')
     expect(msg, '仍要说清「重新登录」这条出路').toMatch(/重新登录/)
   })
+
+describe('★★★ 二轮审计的三个 🔴（行为级，全部落在旧守卫盲区）', () => {
+  /**
+   * ## E-1 🔴B-1 续期后必须用**新 token** 重发
+   *
+   * 旧守卫只断言 `httpCalls >= 2` —— **抓不到用哪张 token**。
+   * 实测缺陷：
+   *
+   * ```
+   * 换票时的 token 序列: ["OLD-TOKEN"]      ← 续期后仍用它
+   * 续期后凭据库:        NEW-TOKEN          ← 库真的改了，但没用上
+   * ```
+   *
+   * 根因：`slots` 是循环**开始前**的一份 `{ id, accessToken }` 快照，
+   * 续期改的是**凭据库** ⇒ 快照不会自己变。
+   *
+   * ⇒ ① 自愈链整条无效；② 每轮白烧一次一次性 `refresh_token` 轮换。
+   */
+  it('★★★ E-1 续期后重发必须用新 token', async () => {
+    const { QwenworkAdapter } = await import('../../src/qwenwork-adapter.js')
+    let store = 'OLD-TOKEN'
+    const exchanged: string[] = []
+    const ad = new QwenworkAdapter({
+      slots: async () => [{ id: 'acc-1', accessToken: store }],
+      mintTicket: async (slot) => {
+        exchanged.push(slot.accessToken)
+        if (slot.accessToken !== 'NEW-TOKEN') {
+          const e = new Error('qwenworkintl: 换取推理票据失败（HTTP 401）——INVALID_TOKEN')
+          ;(e as { status?: number }).status = 401
+          throw e
+        }
+        return {
+          token: 'maas',
+          baseUrl: 'https://api1.example.fake',
+          expiresAtMs: Date.now() + 3_600_000,
+        }
+      },
+      refresh: async () => { store = 'NEW-TOKEN' },
+      // ★ 关键：重新取快照
+      fetchSlots: async () => [{ id: 'acc-1', accessToken: store }],
+    })
+    let code: string | undefined
+    try {
+      for await (const _c of ad.stream({
+        model: 'flash',
+        messages: [{ role: 'user', content: 'hi' }],
+      })) { /* 消费 */ }
+    } catch (e) {
+      code = (e as { code?: string }).code
+    }
+    expect(exchanged, '换票应至少两次（401 后用新 token 重发）').toHaveLength(2)
+    expect(exchanged[0], '第一次用旧 token').toBe('OLD-TOKEN')
+    expect(
+      exchanged[1],
+      '第二次必须用续期后的新 token（用旧的说明 slots 快照没刷新）',
+    ).toBe('NEW-TOKEN')
+    expect(code, '续期成功后不该再报错').toBeUndefined()
+  })
+
+  /**
+   * ## E-2 🔴B-2 续期必须续**刚失败的那个号**
+   *
+   * 原接线用 `pool.getAvailableAccount(provider, '')` 取池里**第一个可用**账号，
+   * 而失败的可能不是它（实测：轮换起点选 acc-2、却续了 acc-1）。
+   * `refresh_token` 一次性轮换 ⇒ 白烧另一个号的凭据。
+   */
+  it('★★★ E-2 refresh 必须收到失败的 slotId', async () => {
+    const { QwenworkAdapter } = await import('../../src/qwenwork-adapter.js')
+    const got: (string | undefined)[] = []
+    const ad = new QwenworkAdapter({
+      slots: async () => [{ id: 'acc-TARGET', accessToken: 't' }],
+      mintTicket: async () => {
+        const e = new Error('HTTP 401 INVALID_TOKEN')
+        ;(e as { status?: number }).status = 401
+        throw e
+      },
+      refresh: async (slotId) => { got.push(slotId) },
+    })
+    try {
+      for await (const _c of ad.stream({
+        model: 'flash',
+        messages: [{ role: 'user', content: 'hi' }],
+      })) { /* 消费 */ }
+    } catch { /* 预期失败 */ }
+    expect(got, 'refresh 应被调用一次').toHaveLength(1)
+    expect(
+      got[0],
+      'refresh 必须收到失败的 slotId（不传则接线层会续错账号）',
+    ).toBe('acc-TARGET')
+  })
+
+  /**
+   * ## E-3 🔴B-3 换票 401 必须被识别成 auth（才触发续期、才有 AUTH 码）
+   *
+   * 换票处原抛**裸 `Error`**（无 `status`）⇒ 分类落到 `transport`：
+   *
+   * ```
+   * 换票 401 归类     → transport   （应为 auth）
+   * refresh 调用次数  → 0           （应为 1）
+   * 抛出的 code      → undefined   （应为 AUTH）
+   * ```
+   *
+   * ⚠️ 登录 token 只有 15 天、MaaS 票据每请求都换 ⇒ 令牌过期时
+   * **第一现场几乎总是换票**，故这一格决定了自愈链在真实场景下是否生效。
+   */
+  it('★★★ E-3 换票 401 必须归为 auth 并触发续期', async () => {
+    const { QwenworkAdapter } = await import('../../src/qwenwork-adapter.js')
+    const { classifyQwenworkFailure } = await import('../../src/qwenwork-adapter.js')
+    // ① 分类器本身：带 status/body 的裸错误必须判成 auth
+    const bare = new Error('qwenworkintl: 换取推理票据失败（HTTP 401）——INVALID_TOKEN')
+    ;(bare as { status?: number }).status = 401
+    ;(bare as { body?: string }).body = '{"errorCode":"INVALID_TOKEN"}'
+    expect(
+      classifyQwenworkFailure(bare).kind,
+      '带 status 的裸错误必须判 auth（否则不续期且无 AUTH 码）',
+    ).toBe('auth')
+    // ② 端到端：换票 401 必须真的触发 refresh
+    let refreshCalls = 0
+    const ad = new QwenworkAdapter({
+      slots: async () => [{ id: 'acc-1', accessToken: 't' }],
+      mintTicket: async () => {
+        const e = new Error('qwenworkintl: 换取推理票据失败（HTTP 401）——INVALID_TOKEN')
+        ;(e as { status?: number }).status = 401
+        ;(e as { body?: string }).body = '{"errorCode":"INVALID_TOKEN"}'
+        throw e
+      },
+      refresh: async () => { refreshCalls++ },
+    })
+    let code: string | undefined
+    try {
+      for await (const _c of ad.stream({
+        model: 'flash',
+        messages: [{ role: 'user', content: 'hi' }],
+      })) { /* 消费 */ }
+    } catch (e) {
+      code = (e as { code?: string }).code
+    }
+    expect(refreshCalls, '换票 401 必须触发续期（原实现 0 次）').toBeGreaterThanOrEqual(1)
+    expect(code, '最终错误码必须是 AUTH（不是 undefined/transport）').toBe('AUTH')
+  })
+
+  /**
+   * ## E-4 🟡B-6 分类器的状态码必须优先于 body 子串
+   *
+   * 实测误分类（修复前）：
+   *
+   * ```
+   * 401 + "context window"                    → context_window（应为 auth）
+   * 429 + "too many requests for this context window" → context_window（应为 rate_limit）
+   * 500 + "insufficient capacity"              → quota（应为 server）
+   * 400 + "insufficient permissions for model" → quota（应为 invalid_request）
+   * ```
+   */
+  it('★★★ E-4 状态码优先于 body 子串（防误分类）', async () => {
+    const { classifyQwenworkError } = await import('../../src/qwenwork-product.js')
+    const cases: Array<[string, number, string, string]> = [
+      ['401 + context window', 401, '{"error":{"message":"invalid token","detail":"context window rotated"}}', 'auth'],
+      ['429 + context window', 429, '{"error":{"message":"too many requests for this context window"}}', 'rate_limit'],
+      ['500 + insufficient capacity', 500, '{"error":{"message":"insufficient capacity"}}', 'server'],
+      ['400 + insufficient permissions', 400, '{"error":{"message":"insufficient permissions for model"}}', 'invalid_request'],
+      ['正常 401', 401, '{"error":{"code":"unauthorized"}}', 'auth'],
+      ['正常 429', 429, '{"error":{"code":"rate_limit"}}', 'rate_limit'],
+    ]
+    for (const [label, status, body, want] of cases) {
+      expect(classifyQwenworkError(status, body).kind, label).toBe(want)
+    }
+  })
+})
+
+describe('★★★ 二轮审计：源码文本级守卫的共性弱点（死分支）', () => {
+  /**
+   * ## 为什么需要这一组
+   *
+   * 二轮审计做了 16 个变异，其中 **6 个全绿**，共同形态是：
+   * **「文本还在、逻辑已死」** ——
+   *
+   * ```ts
+   * allowPermanent: !pool.permanentLocked(id) && false   // 锁定失效，文本仍在
+   * if (isPolicyBlockedAccount(entry) && false) return false  // 封禁号仍被选中
+   * if (false) throwIfAllAccountsRateLimited(...)        // 全限流谎报「请登录」
+   * ```
+   *
+   * 所有 `toMatch(/…/)` 型守卫对这三类**全部无牙**。
+   *
+   * ⇒ 这一组用**常量假条件检测**：把 `index.ts` 里 qwenwork 的 `slotsFor`
+   *   闭包切出来，扫它里面有没有「恒假」或「恒真」的常量短路。
+   *
+   * ⚠️ 这不是万能的（真正彻底的做法是把 `slotsFor` 提到可注入的模块里做行为测试），
+   * 但它能挡住本仓历史上反复出现的「`&& false` / `if (false)`」这一类。
+   */
+  it('★★★ F-1 slotsFor 闭包里不得有常量假条件短路', () => {
+    // 切出 slotsFor 闭包（从声明到它对应的收尾大括号）
+    const startAt = indexCode.indexOf('const slotsFor = async')
+    expect(startAt, '找不到 slotsFor（形态变了？）').toBeGreaterThan(-1)
+    let depth = 0
+    let endAt = -1
+    for (let i = indexCode.indexOf('{', startAt); i < indexCode.length; i++) {
+      const ch = indexCode[i]
+      if (ch === '{') depth++
+      else if (ch === '}') {
+        depth--
+        if (depth === 0) { endAt = i; break }
+      }
+    }
+    expect(endAt, 'slotsFor 大括号不配对').toBeGreaterThan(startAt)
+    const body = indexCode.slice(startAt, endAt)
+    /**
+     * ⚠️ 判据：**不得出现常量假/真短路**。
+     * - `&& false` / `&& 0` / `|| true` ⇒ 恒假/恒真，等于删除该条件
+     * - `if (false)` / `if (0)` ⇒ 整块死代码
+     */
+    const deadPatterns: Array<[RegExp, string]> = [
+      [/&&\s*false\b/, '&& false（恒假短路）'],
+      [/&&\s*0\s*[,)]/, '&& 0（恒假短路）'],
+      [/\|\|\s*true\b/, '|| true（恒真短路）'],
+      [/\bif\s*\(\s*false\s*\)/, 'if (false)（死代码块）'],
+      [/\bif\s*\(\s*0\s*\)/, 'if (0)（死代码块）'],
+      [/!\s*false\b/, '!false（恒真，可疑）'],
+    ]
+    for (const [re, label] of deadPatterns) {
+      expect(
+        re.test(body),
+        `slotsFor 里出现 ${label} ⇒ 该判据实际不生效（文本在、逻辑死）`,
+      ).toBe(false)
+    }
+  })
+
+  /**
+   * ## F-2 关键调用的**参数形态**也要锚住
+   *
+   * 二轮审计还发现：把 `refreshAccountCredential(entry.credentialRef, pool, entry.id)`
+   * 整行包进 `if (false)` 时，只断言函数名的守卫仍然绿。
+   * ⇒ 除了 F-1 的死分支检测，还要锚住**三参形态**（少一个参数就会续错账号）。
+   */
+  it('★★★ F-2 refresh 装配必须是三参形态', () => {
+    expect(
+      indexCode,
+      '必须 refreshAccountCredential(entry.credentialRef, pool, entry.id) 三参',
+    ).toMatch(
+      /refreshAccountCredential\(\s*entry\.credentialRef,\s*pool,\s*entry\.id,?\s*\)/,
+    )
+  })
+
+  /**
+   * ## F-3 **整段 qwenwork 装配**不得有死分支（F-1 只覆盖 slotsFor 闭包）
+   *
+   * 二轮审计实测漏网：把 `await qwenworkintl.refreshAccountCredential(...)`
+   * 包进 `if (false)` 时，F-1 扫不到 —— 因为 `refresh` 装配在 `slotsFor`
+   * **外面**（它是同一个 `registerQwenworkLlm({...})` 对象的另一个字段）。
+   *
+   * ⇒ 扫的范围从「slotsFor 闭包」扩到「`registerQwenworkLlm` 整个调用」。
+   */
+  it('★★★ F-3 qwenwork 装配块不得有常量假条件短路', () => {
+    const at = indexCode.indexOf('registerQwenworkLlm(ctx, {')
+    expect(at, '找不到 registerQwenworkLlm 调用').toBeGreaterThan(-1)
+    // 从调用起点数到配对的大括号
+    let depth = 0
+    let endAt = -1
+    for (let i = indexCode.indexOf('{', at); i < indexCode.length; i++) {
+      const ch = indexCode[i]
+      if (ch === '{') depth++
+      else if (ch === '}') {
+        depth--
+        if (depth === 0) { endAt = i; break }
+      }
+    }
+    expect(endAt, '装配块大括号不配对').toBeGreaterThan(at)
+    const body = indexCode.slice(at, endAt)
+    const deadPatterns: Array<[RegExp, string]> = [
+      [/&&\s*false\b/, '&& false'],
+      [/&&\s*0\s*[,)]/, '&& 0'],
+      [/\|\|\s*true\b/, '|| true'],
+      [/\bif\s*\(\s*false\s*\)/, 'if (false)'],
+      [/\bif\s*\(\s*0\s*\)/, 'if (0)'],
+    ]
+    for (const [re, label] of deadPatterns) {
+      expect(
+        re.test(body),
+        `qwenwork 装配里出现 ${label} ⇒ 该字段/调用实际不生效（文本在、逻辑死）`,
+      ).toBe(false)
+    }
+  })
+
+})

@@ -181,29 +181,52 @@ export interface QwenworkAdapterOptions {
   /**
    * **静默续期凭据**（2026-11-23 审计 P2 补，基准 `trae` / `buddy` / `qoder` 都有）。
    *
-   * ## 为什么需要这条腿
+   * ## ⚠️⚠️ **必须接收「刚失败的那个槽 id」**（2026-11-23 二轮审计修，🔴 真缺陷）
    *
-   * 本家的推理路径原本**只在 `auth` 分支换号、从不续期**：
-   * 一个 `access_token` 过期的账号会被标记成「认证失败」然后跳过，
-   * 试完全部槽后**透传上游原文**。
+   * 原签名是 `() => Promise<void>` —— **不知道续谁**，接线层只能
+   * `pool.getAvailableAccount(provider, '')` 取池里**第一个可用**账号。
+   * 而失败的可能根本不是它：
    *
-   * ⚠️ 而本家**有真实 refresh 端点**
-   * （`POST /api/v1/deviceToken/refresh`，见 `qwenwork-auth.ts`）——
-   * 也就是说「这个号本来救得回来」，却让用户看到一条 401。
+   * ```
+   * 轮换起点选 acc-2 ⇒ slots() 返回 acc-2
+   * 但 refresh() 取到 acc-1 ⇒ 续了 acc-1（还轮换了它的 refresh_token）
+   * ⇒ acc-2 一次都没救到，用户仍看到 401
+   * ```
    *
-   * 缓解项（定时器自愈 / 积分自愈 / 面板「刷新」按钮）确实能补，
-   * 但它们都**不在推理路径上**：用户发消息那一刻撞到过期令牌，
-   * 只能等下一轮定时器，或者自己回面板点一下。
+   * 而 `refresh_token` 是**一次性轮换**的 ⇒ 每轮失败都白烧另一个号的凭据。
    *
-   * ## 调用时机
+   * ## 与 B-1（旧 token）的关系
    *
-   * 在 `stream()` 遍历槽**之前**、且仅当「当前槽的凭据看起来已过期 /
-   * 该槽在本次循环里首次撞到 `auth` 失败」时调一次 —— 见 `stream()` 里的注释。
+   * 光传对账号还不够：`stream()` 在循环**外**只取一次 `slots` 快照，
+   * 续期成功后 `continue` 重发用的仍是**快照里的旧 accessToken**。
+   * 故本字段与 `fetchSlots`（见下）必须**成对**使用 —— 只修一个仍然无效。
    *
-   * ⚠️ 必须**可选**（`?`）：`probeById` 的探针适配器与单测替身不实现它，
-   * 缺省时行为与改动前逐字节相同（本功能的唯一回归面）。
+   * @param slotId 刚认证失败的槽 id（接线层据此续**那一个**账号）
    */
-  readonly refresh?: () => Promise<void>
+  readonly refresh?: (slotId: string) => Promise<void>
+  /**
+   * ★★★ **重新取一次槽快照**（2026-11-23 二轮审计补，修 🔴B-1）。
+   *
+   * ## 为什么必须有
+   *
+   * `stream()` 在循环外 `const slots = await this.options.slots(...)` 只取一次，
+   * 里面是 `{ id, accessToken }` 的**快照**。续期成功后 `tried.delete()` 让该槽
+   * 重新可被选中，但**重发用的还是快照里的旧 token**：
+   *
+   * ```
+   * 换票时用的 token 序列: ["OLD-TOKEN"]        ← 续期后仍用它
+   * 续期后凭据库里的值:    NEW-TOKEN            ← 库真的改了，但没用上
+   * ```
+   *
+   * ⇒ ① 自愈链整条无效（用户仍看到 401）；
+   *   ② 每轮失败都**白烧一次一次性 `refresh_token` 轮换**。
+   *
+   * ## 契约
+   *
+   * 返回**当前**的槽列表（接线层每次现读凭据库）。缺省时退化为「用旧快照」
+   * —— 那是改动前的行为，**只影响续期后的重发**（唯一回归面）。
+   */
+  readonly fetchSlots?: (modelId?: string, sessionId?: string) => Promise<readonly QwenworkSlot[]>
   /** 诊断日志。 */
   readonly warn?: (message: string) => void
 }
@@ -644,7 +667,13 @@ export class QwenworkAdapter extends LlmAdapter {
      * 不传 ⇒ 起点被静默忽略、永远用池里第一个号（用户报障
      * 「轮换起点对本家不起作用」的真根因）。
      */
-    const slots = await this.options.slots(options.model, options.sessionId)
+    /**
+     * ⚠️⚠️ **必须是 `let` 而不是 `const`**（2026-11-23 二轮审计修，🔴B-1）。
+     *
+     * 续期成功后要**重新取一次快照** —— 否则重发用的是循环开始时那份
+     * `{ id, accessToken }` 里的**旧 token**（库已经改了，但这里没看见）。
+     */
+    let slots = await this.options.slots(options.model, options.sessionId)
     if (slots.length === 0) {
       throw new LlmError(
         'qwenworkintl: 没有可用账号。请在 Jet Hub 的千问办公国际版面板点「登录」，'
@@ -702,18 +731,36 @@ export class QwenworkAdapter extends LlmAdapter {
          */
         const authOnly = limited.length > 0 && limited.every((l) => l.endsWith('(认证失败)'))
         /**
-         * ⚠️⚠️ **单账号：直接透传原始错误，不包装**（2026-11-23 二轮审计修）。
+         * ⚠️⚠️ **单账号：报 `AUTH` 码，但把上游原文原样带上**
+         * （2026-11-23 二轮审计二改 —— 前一版只透传、丢了码）。
          *
-         * 单账号没有「汇总」的必要 —— 上游说什么就是什么，
-         * 用户拿到的 `trace_id` / 原始报文一点不少。
-         * 包装只对「多账号、各有各的失败」有价值（那句话解释了为什么全都不行）。
+         * ## 前一版为什么不够（E-3 用例打穿）
          *
-         * ⚠️ 这也让 `AUTH` 码的语义更准：本仓红线说「`AUTH` 码会连 message
-         * 一起吞掉」—— 那条针对的是**宿主**把 message 换掉的行为，
-         * 所以我们在**自己**这一层更不能主动扩大信息损失。
+         * 我第一版这里写的是 `throw lastAuthError`（**原样透传裸错误**），
+         * 好处是上游 `trace_id` / 报文一点不少，**但 `code` 是 `undefined`**
+         * —— 因为换票处抛的是裸 `Error`，构造时根本没带 `code`。
+         *
+         * 而宿主靠 `code` 分派：没有 `AUTH` 码 ⇒ 客户端**不会**渲染
+         * 「重新登录」那句指路文案（本仓红线记录的形态）。
+         *
+         * ## 正确做法：**两者都要**
+         *
+         * `new LlmError(带上游原文的 message, 'AUTH')`：
+         * - `code` 是 `AUTH` ⇒ 宿主给出正确的指路文案；
+         * - `message` 里含上游原文（含 `trace_id`）⇒ 诊断信息一点不少。
+         *
+         * ⚠️ 与多账号那条**同源**：都保留原文，只是单账号不必加
+         * 「全部账号」这类汇总措辞（那句话对单账号没有信息量）。
          */
-        if (authOnly && slots.length === 1 && lastAuthError !== undefined) {
-          throw lastAuthError
+        if (authOnly && slots.length === 1) {
+          const who = limited.length > 0 ? limited[0]!.replace('(认证失败)', '') : ''
+          throw new LlmError(
+            `qwenworkintl: 账号 ${who} 认证失败（令牌已失效，自动续期也未能恢复）。`
+            + '请在 Jet Hub 的千问办公国际版面板重新登录 —— 这与积分无关，'
+            + '不要为此解锁长期积分。'
+            + `${authErrorDetail.length > 0 ? ` 上游原文：${authErrorDetail}` : ''}`,
+            'AUTH',
+          )
         }
         if (authOnly) {
           /**
@@ -817,7 +864,15 @@ export class QwenworkAdapter extends LlmAdapter {
           if (this.options.refresh !== undefined && !refreshed.has(slot.id)) {
             refreshed.add(slot.id)
             try {
-              await this.options.refresh()
+              /**
+               * ⚠️ 传 `slot.id`：接线层必须续**刚失败的那个号**
+               * （2026-11-23 二轮审计修，🔴B-2）。
+               *
+               * 不传时接线层只能 `getAvailableAccount()` 取池里第一个可用账号
+               * ⇒ 实测「轮换起点选 acc-2、却续了 acc-1」，
+               * 而 `refresh_token` 一次性轮换 ⇒ 白烧另一个号的凭据。
+               */
+              await this.options.refresh(slot.id)
               /**
                * ⚠️⚠️ **必须撤销 `tried` 才叫「续期后重试」**（2026-11-23 终审修，真缺陷）。
                *
@@ -845,6 +900,32 @@ export class QwenworkAdapter extends LlmAdapter {
                */
               if (tried.delete(slot.id)) {
                 this.options.warn?.(`qwenworkintl: 账号 ${slot.id} 认证失败，已续期并重试`)
+              }
+              /**
+               * ★★★ **必须重新取槽快照**（2026-11-23 二轮审计修，🔴B-1）。
+               *
+               * ## 不重新取会发生什么（实测）
+               *
+               * ```
+               * 换票时用的 token 序列: ["OLD-TOKEN"]   ← 续期后仍用它
+               * 续期后凭据库里的值:    NEW-TOKEN       ← 库真的改了，但没用上
+               * ```
+               *
+               * `slots` 是 `stream()` 循环**开始前**取的一份 `{ id, accessToken }`
+               * 快照；续期改的是**凭据库**，快照里的 token 不会自己变
+               * ⇒ `tried.delete` 让该槽重新可被选中，但重发仍用旧 token ⇒ 再 401。
+               *
+               * ⇒ 双重浪费：用户仍看到 401 + 每轮白烧一次一次性 `refresh_token`。
+               *
+               * ⚠️ `fetchSlots` 未注入时（探针适配器 / 单测替身）保持旧快照，
+               * 行为与改动前一致（本功能的唯一回归面）。
+               */
+              if (this.options.fetchSlots !== undefined) {
+                try {
+                  slots = await this.options.fetchSlots(options.model, options.sessionId)
+                } catch {
+                  // ⚠️ 取不到就沿用旧快照（不要让「刷新快照失败」变成新错误）。
+                }
               }
               continue
             } catch (refreshError) {
@@ -1015,14 +1096,53 @@ export class QwenworkAdapter extends LlmAdapter {
 export function classifyQwenworkFailure(error: unknown): QwenworkErrorInfo {
   const failure = (typeof error === 'object' && error !== null ? error : {}) as {
     failure?: { status?: unknown; providerRetryAfterMs?: unknown }
+    /**
+     * ⚠️⚠️ **裸错误的 `status` / `body`**（2026-11-23 二轮审计修，🔴B-3）。
+     *
+     * ## 为什么需要读这两个字段
+     *
+     * 本函数原先**只读** `error.failure.status`（`LlmError` 的契约形状）。
+     * 而**换票**那一步（`QwenworkAuth.mintTicket`）抛的是**裸 `Error`**
+     * —— 没有 `failure` 嵌套，于是 `status` 恒 `0` ⇒ 分类落到最后一个
+     * `else`（`transport`）：
+     *
+     * ```
+     * 换票 401 归类     → transport   （应为 auth）
+     * refresh 调用次数  → 0           （应为 1）
+     * 抛出的 code      → undefined   （应为 AUTH）
+     * ```
+     *
+     * ⚠️ 而「登录 token 只有 15 天、MaaS 票据每请求都换」⇒ 令牌过期时
+     * **第一现场几乎总是换票**，不是推理。漏了这一格 ⇒ 自愈链在最高频
+     * 场景下从未生效，且客户端拿不到 `AUTH` 码 ⇒ 不渲染「重新登录」。
+     *
+     * ## 判据
+     *
+     * `failure.status`（`LlmError`）优先；缺席时读 `status`（裸错误）。
+     * 两者都没有 ⇒ `0`（与改动前一致）。
+     * `body` 也一并读进来：真实的上游报文比 `error.message` 里的前缀更纯
+     *（`message` 形如 `"qwenworkintl: 换取推理票据失败（HTTP 401）——{…}"`，
+     * 把它当 body 喂给分类器会让子串判据命中包装文案而不是上游原文）。
+     */
+    status?: unknown
+    body?: unknown
   }
-  const status = typeof failure.failure?.status === 'number' ? failure.failure.status : 0
+  const nestedStatus = typeof failure.failure?.status === 'number' ? failure.failure.status : undefined
+  const flatStatus = typeof failure.status === 'number' ? failure.status : undefined
+  const status = nestedStatus ?? flatStatus ?? 0
   const providerRetryAfterMs = typeof failure.failure?.providerRetryAfterMs === 'number'
     && Number.isFinite(failure.failure.providerRetryAfterMs)
     ? failure.failure.providerRetryAfterMs
     : undefined
-  const message = error instanceof Error ? error.message : String(error)
-  const info = classifyQwenworkError(status, message)
+  /**
+   * ⚠️ **body 优先**：裸错误带的 `body` 是**纯上游报文**，
+   * 而 `error.message` 前面那段包装文案（`"换取推理票据失败（HTTP 401）——"`）
+   * 会让分类器的子串判据命中错的地方。
+   */
+  const body = typeof failure.body === 'string' && failure.body.length > 0
+    ? failure.body
+    : error instanceof Error ? error.message : String(error)
+  const info = classifyQwenworkError(status, body)
   return providerRetryAfterMs === undefined
     ? info
     : { ...info, retryAfterMs: info.retryAfterMs ?? providerRetryAfterMs }
