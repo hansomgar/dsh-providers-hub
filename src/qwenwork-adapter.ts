@@ -138,8 +138,22 @@ export interface QwenworkAdapterOptions {
    * `refresh-bootstrap-wiring.spec.ts` 按这个键扫不变式。
    */
   readonly credentialRef?: unknown
-  /** 可用槽位（传 `modelId` 时接线层应跳过处于限流窗口的账号）。 */
-  readonly slots: (modelId?: string) => Promise<readonly QwenworkSlot[]>
+  /**
+   * 可用槽位。
+   *
+   * @param modelId 传了就跳过「该模型正处于限流窗口」的账号（目录路径刻意不传）。
+   * @param sessionId ★ **轮换起点必需**（2026-11-23 补）：接线层据此查
+   *   `pool.preferredRotationFor(provider, sessionId)` 拿到本会话选定的起点账号。
+   *
+   * ⚠️⚠️ **缺这个入参 = 「轮换起点」对本家完全无效**（真实缺陷）：
+   * 起点是按 `(provider, sessionId)` 存的，没有 `sessionId` 就只能传 `undefined`
+   * ⇒ `preferredRotationFor` 返回 `undefined` ⇒ 起点被静默忽略、永远用池里第一个号。
+   * 症状与「我明明选了起点，怎么还是从第一个开始」完全一致。
+   *
+   * ⚠️ 可选（`?`）：目录路径（`listAllModels` / 冷启动）没有会话上下文，
+   * 那一路传 `undefined` 是对的 —— 它只在「有没有账号」这个层面上用。
+   */
+  readonly slots: (modelId?: string, sessionId?: string) => Promise<readonly QwenworkSlot[]>
   /**
    * 换 MaaS 票据。
    *
@@ -526,8 +540,13 @@ export class QwenworkAdapter extends LlmAdapter {
    * 3. **认证类不写限流标记**（写它会放大成「全池被封」）。
    */
   async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
-    // ⚠️ 传 modelId：接线层据此跳过「该模型正处于限流窗口」的账号。
-    const slots = await this.options.slots(options.model)
+    /**
+     * ⚠️ 传 `modelId`：接线层据此跳过「该模型正处于限流窗口」的账号。
+     * ⚠️⚠️ 传 `options.sessionId`：**轮换起点必需**（2026-11-23 修）。
+     * 不传 ⇒ 起点被静默忽略、永远用池里第一个号（用户报障
+     * 「轮换起点对本家不起作用」的真根因）。
+     */
+    const slots = await this.options.slots(options.model, options.sessionId)
     if (slots.length === 0) {
       throw new LlmError(
         'qwenworkintl: 没有可用账号。请在 Jet Hub 的千问办公国际版面板点「登录」，'

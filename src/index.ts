@@ -5069,7 +5069,7 @@ export function apply(ctx: Context): void {
      * ⚠️ `modelId` 缺省（目录路径）时**仍走分档**：目录不该因余额查不到而空，
      * 故那条路径用 `degradeOnUnknown` 语义（查不到就放行）。
      */
-    slots: async (modelId?: string) => {
+    slots: async (modelId?: string, sessionId?: string) => {
       const entries = await pool.listAccounts(QWENWORK_INTL.id)
       // ⚠️ 先按「启用 + 模型限流」筛候选（与其余 provider 同一判据）。
       const candidates = entries.filter((entry) => {
@@ -5083,6 +5083,50 @@ export function apply(ctx: Context): void {
         return true
       })
       if (candidates.length === 0) return []
+      /**
+       * ★★★ **轮换起点的四个入参**（2026-11-23 补，真实缺陷修复）。
+       *
+       * ## 症状
+       *
+       * 用户在 Jet Hub 面板给本家选了「轮换起点」（比如指定用第 3 个号），
+       * 但**完全不起作用** —— 永远从池里第一个号开始。
+       *
+       * ## 根因
+       *
+       * 本家的选号是在**这个 `slots()` 闭包里**直接调 `pickBuddyAccount`，
+       * 而「轮换起点」的参数是 `credential-resolver.ts` 的 buddy 分支
+       * （L611-657）里读池并传下去的。我照抄了调用形态却**漏了这四个字段**
+       * ⇒ `pickBuddyAccount` 拿不到起点 ⇒ 静默回落默认第一个号。
+       *
+       * ⚠️ 这**不是**「起点功能坏了」，而是本家**从未接线**。
+       * `credential-resolver.ts` 里那四个字段的注释逐字写了漏传的后果
+       *（「只传 id 不传档位 ⇒ 永远走 S5 ⇒ 静默不生效且不会有任何报错」）。
+       *
+       * ## 四个字段各自的作用（缺一不可）
+       *
+       * | 字段 | 作用 | 漏了会怎样 |
+       * |---|---|---|
+       * | `rotationStartId` | 本会话选定的起点账号 id | 起点完全不生效 |
+       * | `rotationStartTier` | 起点**选定那一刻**的档位快照 | 老数据静默走 S5（「重选过起点却还是先烧自己的」）|
+       * | `enabledAccountIds` | **未过滤**的池序（定位基准） | 起点被限流/封禁时静默回落第一个号 |
+       * | `strictManualOrder` | 严格手动顺序开关 | 用户打开后仍然按积分档位排 |
+       *
+       * ⚠️ `sessionId` 缺省（目录路径）时 `preferredRotationFor` 返回
+       * `undefined` ⇒ 四个字段全不传 ⇒ 行为与改动前逐字节相同
+       *（这条是本功能唯一的回归面）。
+       */
+      const rotationStartId = sessionId === undefined
+        ? undefined
+        : pool.preferredRotationFor?.(QWENWORK_INTL.id, sessionId)
+      const rotationStartTier = rotationStartId === undefined
+        ? undefined
+        : pool.rotationStartTierFor?.(QWENWORK_INTL.id, sessionId)
+      const enabledAccountIds = rotationStartId === undefined
+        ? undefined
+        : pool
+            .listAccountsByProvider(QWENWORK_INTL.id)
+            .filter((a) => a.enabled)
+            .map((a) => a.id)
       const picked = await pickBuddyAccount<QwenworkCredential>(
         qwenworkintlBalanceSelector,
         candidates.map((entry) => ({ id: entry.id, credentialRef: entry.credentialRef })),
@@ -5096,6 +5140,11 @@ export function apply(ctx: Context): void {
            * 请求路径则**不降级** —— 那里必须严守锁定语义。
            */
           degradeOnUnknown: modelId === undefined,
+          // ⚠️ **每次现读**（面板可随时切换），且未实现时视为关闭。
+          strictManualOrder: pool.strictManualOrder?.(QWENWORK_INTL.id) === true,
+          ...(rotationStartId === undefined ? {} : { rotationStartId }),
+          ...(rotationStartTier === undefined ? {} : { rotationStartTier }),
+          ...(enabledAccountIds === undefined ? {} : { enabledAccountIds }),
         },
       )
       if (picked.kind === 'account') {

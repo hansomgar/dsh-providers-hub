@@ -160,3 +160,77 @@ describe('★ QwenWork：auth 暴露了选号所需的读取口', () => {
     expect(d?.displayName).toBe(QWENWORK_INTL.displayName)
   })
 })
+
+describe('★★★ 轮换起点接线（2026-11-23 真实缺陷：从未接线）', () => {
+  /**
+   * ## 症状
+   *
+   * 用户在面板给本家选了「轮换起点」，但完全不起作用 —— 永远从池里第一个号开始。
+   *
+   * ## 根因
+   *
+   * 本家的选号是在 index.ts 的 slots() 闭包里直接调 pickBuddyAccount，
+   * 而「轮换起点」的四个参数是 credential-resolver.ts 的 buddy 分支读池后传的。
+   * 照抄调用形态却漏了这四个字段 ⇒ 起点被静默忽略。
+   *
+   * ⚠️ 这不是「功能坏了」而是「从未接线」，所以**行为级用例抓不到**
+   *（没有任何报错），必须用源码级锚点守。
+   */
+  it('★★★ slots() 必须接收 sessionId', () => {
+    // ⚠️ 起点是按 (provider, sessionId) 存的；没有 sessionId 就无从查起。
+    expect(
+      indexCode,
+      'slots 必须收 sessionId，否则 preferredRotationFor 拿不到起点',
+    ).toMatch(/slots:\s*async\s*\(modelId\?:\s*string,\s*sessionId\?:\s*string\)/)
+  })
+
+  it('★★★ slots() 必须真的读 pool.preferredRotationFor', () => {
+    expect(indexCode, '没读 preferredRotationFor ⇒ 起点完全不生效').toMatch(
+      /pool\.preferredRotationFor\?\.\(QWENWORK_INTL\.id,\s*sessionId\)/,
+    )
+  })
+
+  it('★★★ 四个字段必须同时传给 pickBuddyAccount', () => {
+    // ⚠️ 缺任意一个都会静默失效，四种失效形态各不相同：
+    //    rotationStartId   → 起点完全不生效
+    //    rotationStartTier → 老数据静默走 S5（重选过起点却还先烧自己的）
+    //    enabledAccountIds → 起点被限流/封禁时静默回落第一个号
+    //    strictManualOrder → 打开严格模式仍按积分档位排
+    //
+    // ⚠️⚠️ **锚点必须是「传参形态」，不能是裸字段名**（变异验证实测）：
+    // 裸 `/rotationStartTier\b/` 会被**注释里**的同名字样命中 ⇒
+    // 删掉真正的那行传参、注释留着 ⇒ 守卫仍然绿（M3/M4 无牙）。
+    expect(indexCode, 'rotationStartId 必须传').toMatch(
+      /\.\.\.\(rotationStartId === undefined \? \{\} : \{ rotationStartId \}\)/,
+    )
+    expect(indexCode, 'rotationStartTier 必须传').toMatch(
+      /\.\.\.\(rotationStartTier === undefined \? \{\} : \{ rotationStartTier \}\)/,
+    )
+    expect(indexCode, 'enabledAccountIds 必须传').toMatch(
+      /\.\.\.\(enabledAccountIds === undefined \? \{\} : \{ enabledAccountIds \}\)/,
+    )
+    expect(indexCode, 'strictManualOrder 必须传').toMatch(
+      /strictManualOrder: pool\.strictManualOrder\?\.\(QWENWORK_INTL\.id\) === true/,
+    )
+  })
+
+  it('★★ 适配器 stream 必须把 sessionId 透传给 slots', () => {
+    // ⚠️ 适配器侧漏传的话，接线层收到了 sessionId 也永远是 undefined。
+    const adapterSource = readFileSync(
+      resolve(here, '../../src/qwenwork-adapter.ts'),
+      'utf8',
+    )
+    const adapterCode = codeOnly(adapterSource)
+    expect(
+      adapterCode,
+      'stream 里必须 this.options.slots(options.model, options.sessionId)',
+    ).toMatch(/this\.options\.slots\(options\.model,\s*options\.sessionId\)/)
+  })
+
+  it('★★ 目录路径（无 sessionId）时行为与改动前逐字节相同', () => {
+    // ⚠️ 这是本功能唯一的回归面：没有会话上下文时不该查池、不该改选号。
+    expect(indexCode).toMatch(
+      /const rotationStartId = sessionId === undefined\s*\n\s*\? undefined/,
+    )
+  })
+})
