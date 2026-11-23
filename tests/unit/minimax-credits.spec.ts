@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import {
   claimMinimaxDailyCheckin,
   fetchMinimaxCreditBalance,
+  fetchMinimaxCreditBalanceDetailed,
   fetchMinimaxSigninStatus,
   minimaxPanelToCheckinStatus,
   parseMinimaxSigninPanel,
@@ -430,5 +431,121 @@ describe('★★ HTTP 非 2xx 不得被当成成功（issue IKMEVG 的第二道�
     const outcome = await claimMinimaxDailyCheckin(CRED, fetcher as never)
     expect(outcome.kind).toBe('failed')
     expect(outcome.message).toBe('invalid timezone_id')
+  })
+})
+
+/**
+ * ★★★ **`credit/details` 必须带 `page_size`**（issue #141，2026-11-23 主理修复）。
+ *
+ * ## 缺陷
+ *
+ * 该端点**默认只返回最近 20 个积分包**，而余额是「可见包 `remaining_amount` 求和」
+ * ⇒ 被挤出窗口的包**从界面上消失**。用户每天签到新增一个包、最老的被挤出 ⇒
+ * 当被挤出包的余额≈新增包金额时，**界面总额彻底不动**
+ *（「签到成功但积分不涨」），且**误差随天数单调扩大**。
+ *
+ * ## 作者给的实测（issue #141，真实账号）
+ *
+ * `minimaxintl`，`total_count = 23`：
+ * 默认 20 条 Σ=**11600.00** vs `?page_size=50` 23 条 Σ=**12781.43**，差 1181.43。
+ */
+describe('fetchMinimaxCreditBalanceDetailed：必须带 page_size', () => {
+  const row = (remaining: number, grantedAt: number) => ({
+    remaining_amount: String(remaining),
+    granted_at_ms: grantedAt,
+    expire_at_ms: grantedAt + 86_400_000,
+  })
+
+  it('★★★ URL 必须带 page_size（否则默认只回 20 条 ⇒ 余额少算）', async () => {
+    const fetcher = vi.fn().mockResolvedValue(json({
+      total_count: 1,
+      details: [row(400, 1_700_000_000_000)],
+      base_resp: { status_code: 0 },
+    }))
+    await fetchMinimaxCreditBalanceDetailed(CRED, fetcher as never)
+    const url = String(fetcher.mock.calls[0]?.[0])
+    /**
+     * ⚠️⚠️ **必须钉住「够大」这个值，不能只断言「参数在」**（2026-11-23 正向审计 P1②）。
+     *
+     * 第一版写的是 `toContain('page_size=')` —— 而变异测试证明：
+     * `?page_size=`（空值）与 **`?page_size=20`（= 本缺陷本体！）** 都能让它**全绿**。
+     * 「参数存在」与「参数够大」是两件事，而缺陷偏偏只会在后者上复发。
+     */
+    expect(url, 'issue #141：必须带 page_size').toContain('page_size=')
+    const size = Number(/[?&]page_size=(\d+)/.exec(url)?.[1])
+    expect(Number.isFinite(size), 'page_size 必须是数字').toBe(true)
+    expect(size, 'page_size 必须远大于上游默认窗口 20（取 1000 ⇒ 约 2.7 年）').toBeGreaterThanOrEqual(1000)
+  })
+
+  it('★★★ 拿到全部 23 个包时，余额是**全部**之和（不是前 20 个）', async () => {
+    // 前 20 个各 100 分 = 2000；后 3 个是「被挤出窗口」的那几笔（issue 实测形态）。
+    const details = [
+      ...Array.from({ length: 20 }, (_, i) => row(100, 1_700_000_000_000 + i)),
+      row(400, 1_690_000_000_000),
+      row(400, 1_689_000_000_000),
+      row(381.43, 1_688_000_000_000),
+    ]
+    const fetcher = vi.fn().mockResolvedValue(json({
+      total_count: 23,
+      details,
+      base_resp: { status_code: 0 },
+    }))
+    const out = await fetchMinimaxCreditBalanceDetailed(CRED, fetcher as never)
+    expect(out.balance, '不该是 null').not.toBeNull()
+    // 2000 + 400 + 400 + 381.43 = 3181.43
+    expect(out.balance?.total, '必须把被挤出窗口的 3 笔也算进来').toBeCloseTo(3181.43, 2)
+  })
+
+  it('★★ 反向：只有 20 条时仍如实求和（不得为了「补全」编造金额）', async () => {
+    const details = Array.from({ length: 20 }, (_, i) => row(100, 1_700_000_000_000 + i))
+    const fetcher = vi.fn().mockResolvedValue(json({
+      total_count: 23,   // ← 服务端说共 23 条，但这次只回了 20 条（截断形态）
+      details,
+      base_resp: { status_code: 0 },
+    }))
+    const out = await fetchMinimaxCreditBalanceDetailed(CRED, fetcher as never)
+    expect(out.balance?.total, '缺口不得被编造/按均值外推').toBeCloseTo(2000, 2)
+  })
+})
+
+/**
+ * ★★★ **带 `page_size` 失败必须回退**（2026-11-23 对抗审计 P1-3）。
+ *
+ * ## 为什么这条必须有
+ *
+ * 作者真机只验证过 `page_size=50`，**`1000` 从未实测**。若上游校验上限并回 4xx，
+ * 而代码**只加参数、不加回退** ⇒ 余额恒 `null` ⇒ 折算层判 `UNUSABLE`
+ * ⇒ **minimax 从聚合轮换里静默消失**。那比原缺陷（少算几百分）**更糟**：
+ * 用户丢的是**整家渠道**。
+ *
+ * ⇒ 判据：**大窗口失败 ⇒ 退回裸请求**（拿到 20 条 = 修复前的行为）。
+ * 最坏情况退化成修复前的样子，绝不比修复前更差。
+ */
+describe('fetchMinimaxCreditBalanceDetailed：page_size 失败必须回退', () => {
+  it('★★★ 带 page_size 的请求 4xx ⇒ 回退裸请求，余额仍然可用', async () => {
+    const calls: string[] = []
+    const fetcher = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      calls.push(url)
+      // 带 page_size 的请求被上游拒绝（模拟「1000 不被接受」）。
+      if (url.includes('page_size')) return json({ base_resp: { status_code: 400, status_msg: 'invalid page_size' } }, 400)
+      return json({
+        total_count: 1,
+        details: [{ remaining_amount: '800', granted_at_ms: 1_700_000_000_000, expire_at_ms: 1_700_100_000_000 }],
+        base_resp: { status_code: 0 },
+      })
+    })
+    const out = await fetchMinimaxCreditBalanceDetailed(CRED, fetcher as never)
+    expect(calls.length, '应当先试大窗口、失败再退回裸请求').toBe(2)
+    expect(out.balance, '回退后余额必须可用 —— 否则 minimax 会从聚合轮换里静默消失').not.toBeNull()
+    expect(out.balance?.total).toBeCloseTo(800, 2)
+    expect(out.error).toBeUndefined()
+  })
+
+  it('★★ 两次都失败时才如实报错（不编造余额）', async () => {
+    const fetcher = vi.fn(async () => json({ base_resp: { status_code: 401, status_msg: 'unauthorized' } }, 401))
+    const out = await fetchMinimaxCreditBalanceDetailed(CRED, fetcher as never)
+    expect(out.balance).toBeNull()
+    expect(out.error, '两次都失败必须带原因').toBeDefined()
   })
 })

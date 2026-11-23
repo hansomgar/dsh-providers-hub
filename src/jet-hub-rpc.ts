@@ -9646,6 +9646,51 @@ function registerJetHubEndpoints(
       //   auth 实例，查全局表会让测试无法注入桩、并重开「位置/时序错位」那扇门。
       case 'credits.claimAll': {
         const req = payload as RpcCreditsClaimAllRequest
+        /**
+         * ⚠️⚠️ **这是 `claimAll` 下唯一的账号枚举点，也是它下面三段遍历的共同入口**。
+         *
+         * `case 'credits.claimAll'` 里有**三段互不复用的遍历**（2026-11-23 核对）：
+         *
+         * 1. **ZCode 特例**（紧跟本行之后）：自己遍历账号 + plan，每号**现产 captcha**，
+         *    不走 `collectClaimResults` 那套「一个凭据一次 claim」的形状
+         *    （它假设「今日是否已领」可由 `precheckStatus` 判定，而 ZCode 没有这个端点）；
+         * 2. **Qoder 同族**：走 `collectClaimResults`；
+         * 3. **表分派**（其余各家）：也走 `collectClaimResults`。
+         *
+         * ⇒ **任何「只在这三段的骨架里改一次」的动作都会漏掉 ZCode 那一段。**
+         *    要改「哪些账号参与领取」这类语义，必须落在**本行（枚举点）**，
+         *    而不是某个遍历的循环体里。反过来，若只改 `collectClaimResults` 内部，
+         *    症状是「ZCode 上的行为与其它家不一致」—— 而且它**静默**（无报错、无日志）。
+         *
+         * ## ⚠️⚠️ 为什么**不要**在这里按 `enabled` 过滤（2026-11-23 定案，PR #146 因此关闭）
+         *
+         * 「停用账号」在本仓库承重的是**另一个语义**：**不消耗（不进推理轮换），
+         * 但仍然照常签到（继续攒积分）** —— 这是**刻意的设计**，不是缺陷。
+         * 用户停用豆包的真实目的正是「别烧额度但别停签到」。
+         *
+         * ⇒ 写成 `.filter((entry) => entry.enabled !== false)` 会**破坏这个用法**。
+         *    （顺带记：那个写法本身是对的 —— 用 `!== false` 而不是真值判断，
+         *    因为老账号的 `enabled` 是 `undefined`，`filter(e => e.enabled)` 会误杀它们。
+         *    所以它是「对的写法、错的用法」。）
+         *
+         * 将来若真需要「某些场景跳过停用账号」，**另加显式开关**，不要复用 `enabled`：
+         * 同一字段承重两个相反语义，改一边必然踩到另一边。
+         *
+         * ## ⚠️⚠️ 想在这里加过滤时，还有一条**成文铁律**会挡住你
+         *
+         * `healExpiredAccounts(accounts)` 也吃**本份列表** —— 而续期**不得**按 `enabled` 过滤：
+         * 那是**两次真实缺陷**的教训，已是本仓库的成文约定，三处引用同一句：
+         * - `docs/adding-a-new-provider.md:137`「续期不得按 `enabled` 过滤；也**不得**按 `refreshable` 过滤」
+         * - `src/types.ts:1023`
+         * - `src/usage-badge.ts:133`
+         *
+         * ⇒ 在这里加过滤会**顺带**让停用账号停止续期 = 违反铁律（凭据会烂）。
+         *   而且 `credits.balances` 那条腿传的是 `allAccounts`（不过滤）⇒
+         *   同一个 `healExpiredAccounts` 会**两套判据**，比不加过滤更糟。
+         *
+         * 2026-11-23 对抗审计实测：PR #146 原意「顺带修掉续期」正是踩到这一条
+         * （它的 `heal(allAccounts)` 与 `balances:9887` 的调用口径不一致）。
+         */
         const accounts = await pool.listAccounts(req.provider)
         // ⚠⚠ **领取前也要按需自愈**（issue IKKHL5，与 `credits.balances` 同一层）。
         //

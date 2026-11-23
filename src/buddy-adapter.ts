@@ -2916,7 +2916,27 @@ export class BuddyAdapter extends LlmAdapter {
       function: {
         name: tool.name,
         description: tool.description,
-        parameters: tool.parameters,
+        /**
+         * ★★★ **发上游之前必须 sanitize**（issue #138，2026-11-23）。
+         *
+         * 腾讯系（`copilot.tencent.com` / `www.workbuddy.ai`）对 `parameters` 做**严格
+         * JSON Schema 校验**，任一条不合规就把**整个请求** 400 `11129
+         * invalid function call parameters` —— 而且错误里**不带工具名**，
+         * 用户看到的是「换个模型就好了」（宽松模型不校验）这种假象。
+         *
+         * 四类实测形态（issue 作者真机 A/B，同一凭据/模型/SSE 重放）：
+         * 1. 根级 `{type:'object'}` 缺 `properties`（`analyzeImage` 曾踩过）；
+         * 2. 嵌套层残缺：`{}` / 裸 `{description}`（`codegraph` 踩过）；
+         * 3. 根级 `$schema` / `$id`（OpenAI function calling 子集不含这些）；
+         * 4. **`pattern` 含 `\0` 转义**（`apple-mail` 的 `^[^\r\n\0]*$`，就是本次真凶）。
+         *
+         * ⚠️ `\0` 不是合法的正则空字符转义写法，腾讯校验器**直接拒收**；
+         *    而 `\^@`（caret notation，语义完全相同）**通过** ⇒ 改写而不是删字段。
+         *
+         * ⚠️ **必须递归**：违规可能藏在 `properties.*`、`items`、`anyOf`/`oneOf`/`allOf`
+         *    任意一层；只查根级等于没修（历史三次都踩在不同层）。
+         */
+        parameters: sanitizeToolSchema(tool.parameters),
       },
     }))
 
@@ -4980,4 +5000,162 @@ async function readBuddyErrorDetail(response: Response): Promise<string> {
   } catch {
     return ''
   }
+}
+
+/**
+ * ★★★ **腾讯系 `parameters` 的递归 sanitize**（issue #138，2026-11-23）。
+ *
+ * ## 为什么需要它
+ *
+ * `copilot.tencent.com` / `www.workbuddy.ai` 对工具 `parameters` 做**严格 JSON Schema
+ * 校验**：工具表里**任意一个**工具不合规，**整个请求**就 400 `11129`，
+ * 而且响应里**不带工具名** ⇒ 只能靠二分法排查（成本极高）。
+ * 更糟的是校验严格度**随模型变化**（`hy4flash-free` 不校验、`deepseek-v4.1-flash` 严格）
+ * ⇒ 用户会得到「换个模型就好」的假象。
+ *
+ * ## 修的四类（都是真机实测过的形态）
+ *
+ * 1. **根级 / 嵌套 `{type:'object'}` 缺 `properties`** → 补 `{}`；
+ * 2. **裸对象**（无 `type` 也无组合键）→ 补 `type:'object', properties:{}`；
+ * 3. **根级 `$schema` / `$id`** → 剥掉（只是 draft 声明，无语义损失）；
+ * 4. **`pattern` 含 `\0`** → 改写成 `\^@`（语义不变，腾讯接受）。
+ *
+ * ## 判据要点
+ *
+ * - **只加不改**：能补的补（`properties` / `items`），**不删**有语义的字段；
+ * - **不碰无关字段**（`description` / `enum` / `$ref` / `const` / `prefixItems` 一律原样）；
+ * - **结构共享友好**：没变就返回**原对象**（`===` 可判），避免整棵 schema 深拷贝；
+ * - `\0` 判断用**字符串里真有那两个字符**（反斜杠 + `0`），不是 `\u0000`。
+ */
+export function sanitizeToolSchema<T>(node: T, isRoot = true): T {
+  if (node === null || typeof node !== 'object' || Array.isArray(node)) return node
+  const src = node as unknown as Record<string, unknown>
+  let out: Record<string, unknown> = src
+
+  /**
+   * ③ 根级 draft 声明 → 剥掉。
+   *
+   * ⚠️⚠️ **只在根级剥，且 `$id` 要格外小心**（2026-11-23 对抗审计 P1④）：
+   * `$id` 会**改变相对 `$ref` 的解析基准**，嵌套层剥掉它会让 `$ref` 指向别处
+   * ⇒ 那是**改语义**，比不修更糟。根级剥是安全的（parameters 子集不含它，
+   * 且根级 `$ref` 本来就该是绝对/内部引用）。
+   */
+  if (isRoot && ('$schema' in out || '$id' in out)) {
+    out = { ...out }
+    delete out.$schema
+    delete out.$id
+  }
+
+  /**
+   * ② 裸 schema → 补 `type:'object'`。
+   *
+   * ⚠️⚠️ **不能只要有「对象形状」就补**（2026-11-23 对抗审计 P1④）：
+   * 实测误伤 `{ minimum: 0 }` / `{ format: 'email' }` / `{ not: {...} }` /
+   * `{ items: {...} }` —— 它们带**校验关键字**但没写 `type`（JSON Schema 里
+   * 合法：`minimum` 只对数字生效，`format` 只对字符串生效）。
+   * 强加 `type:'object'` 会让上游按 **object** 校验 ⇒ **合法参数被拒**。
+   *
+   * ⇒ 判据收紧成「**没有任何约束关键字**」（纯描述性的 schema 才补）。
+   */
+  const CONSTRAINT_KEYS = [
+    'type', 'enum', 'anyOf', 'oneOf', 'allOf', '$ref', 'const', 'prefixItems',
+    // 数值
+    'minimum', 'maximum', 'exclusiveMinimum', 'exclusiveMaximum', 'multipleOf',
+    // 字符串
+    'minLength', 'maxLength', 'pattern', 'format',
+    // 数组
+    'items', 'minItems', 'maxItems', 'uniqueItems', 'contains', 'minContains', 'maxContains',
+    // 对象
+    'properties', 'additionalProperties', 'patternProperties', 'required',
+    'minProperties', 'maxProperties', 'dependentRequired', 'dependentSchemas', 'propertyNames',
+    // 组合 / 逻辑
+    'not', 'if', 'then', 'else',
+    // 引用容器
+    '$defs', 'definitions',
+  ]
+  const hasConstraint = CONSTRAINT_KEYS.some((key) => key in out)
+
+  if (out.type === undefined && !hasConstraint) {
+    out = { ...out, type: 'object', properties: {} }
+  }
+
+  // ① `type:'object'` 缺 `properties` → 补空对象（腾讯校验器要求键存在）。
+  //
+  // ⚠️ `type` 可能是**数组**（`['object','null']`，2026-11-23 审计 P1④）——
+  //    那种形态下 `out.type === 'object'` 判据走不到 ⇒ 显式处理。
+  const typeList = Array.isArray(out.type) ? out.type : [out.type]
+  if (typeList.includes('object') && !('properties' in out)) {
+    out = { ...out, properties: {} }
+  }
+
+  // ④ `type` 含 'array' 且缺 `items`/`prefixItems` → 补 `items`。
+  //    `prefixItems` 存在时**不得**补（两者互斥，见上）。
+  if (typeList.includes('array') && !('items' in out) && !('prefixItems' in out)) {
+    out = { ...out, items: { type: 'object', properties: {} } }
+  }
+
+  // ⑤ `pattern` 里的 `\0`（真凶）→ `\x00`（语义等价，见下方长注释）。
+  if (typeof out.pattern === 'string' && out.pattern.includes('\\0')) {
+    out = { ...out, pattern: out.pattern.replace(/\\0(?![0-9])/g, '\\x00') }
+  }
+
+  /**
+   * ⑥⑦⑧ **递归所有能装子 schema 的位置**（2026-11-23 对抗审计 P1②：原实现只递归
+   * `properties`/`items`/`anyOf`/`oneOf`/`allOf` 共 5 处，**12 处能被打穿**）。
+   *
+   * 实测打穿形态：`$defs` / `definitions` / `additionalProperties` /
+   * `patternProperties` / `not` / `if` / `then` / `else` / `dependentSchemas` /
+   * `contains` / `propertyNames` / 数组形态 `items` / `prefixItems` / `unevaluated*`。
+   *
+   * ⚠️ **最现实的形态**：zod 生成的 schema 常是「根级 `$ref` + `$defs`」——
+   *    原实现会剥掉 `$schema` 却**完全不碰 `$defs`** ⇒ `\0` 原样发给上游 ⇒ 仍旧 400。
+   */
+  const recurse = (value: unknown): unknown => sanitizeToolSchema(value, false)
+
+  /** 单值容器：值是 schema。 */
+  for (const key of [
+    'additionalProperties', 'additionalItems', 'not', 'if', 'then', 'else',
+    'contains', 'propertyNames', 'unevaluatedProperties', 'unevaluatedItems',
+  ] as const) {
+    const child = out[key]
+    if (child !== null && typeof child === 'object' && !Array.isArray(child)) {
+      const next = recurse(child)
+      if (next !== child) out = { ...out, [key]: next }
+    }
+  }
+
+  /** 字典容器：值是 `{ name: schema }`。 */
+  for (const key of ['properties', 'patternProperties', '$defs', 'definitions', 'dependentSchemas'] as const) {
+    const bag = out[key]
+    if (bag === null || typeof bag !== 'object' || Array.isArray(bag)) continue
+    let changed = false
+    const next: Record<string, unknown> = {}
+    for (const [name, value] of Object.entries(bag as Record<string, unknown>)) {
+      const child = recurse(value)
+      if (child !== value) changed = true
+      next[name] = child
+    }
+    if (changed) out = { ...out, [key]: next }
+  }
+
+  /** 数组容器：值是 schema 数组。 */
+  for (const key of ['anyOf', 'oneOf', 'allOf', 'prefixItems', 'items'] as const) {
+    const list = out[key]
+    if (!Array.isArray(list)) continue
+    let changed = false
+    const next = list.map((item) => {
+      const child = recurse(item)
+      if (child !== item) changed = true
+      return child
+    })
+    if (changed) out = { ...out, [key]: next }
+  }
+
+  /** 单 schema 容器（`items` 的非数组形态）。 */
+  if ('items' in out && out.items !== null && typeof out.items === 'object' && !Array.isArray(out.items)) {
+    const child = recurse(out.items)
+    if (child !== out.items) out = { ...out, items: child }
+  }
+
+  return out as unknown as T
 }
