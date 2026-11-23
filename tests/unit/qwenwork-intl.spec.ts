@@ -11,7 +11,7 @@
  *
  * ⚠️ **不发任何真实网络请求**：所有 fetch 都是注入了桩的。
  */
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   QWENWORK_INTL,
   QWENWORK_INTL_FALLBACK_MODELS,
@@ -52,6 +52,28 @@ function makeJwt(payload: Record<string, unknown>): string {
   return `${header}.${body}.signature-part`
 }
 
+/**
+ * ⚠️⚠️ **单测禁止真发网络**（2026-11-23 二轮审计修，🟡B-10）。
+ *
+ * `resolveModel` / `listModels` 会经 `loadCatalogEntries` → `loadRemoteModels`
+ * 真的打 `https://qwenwork.ai/api/chat-modes`。实测本文件的用例**真的发了**
+ * 那个请求（外网当前回 401 ⇒ 静默回退兜底表 ⇒ 断言仍绿）。
+ *
+ * 后果有两层：
+ * ① 违反 `vitest.config.ts` 的「单测不发网络」纪律（`DSH_UNIT_TEST_NO_WREQ`
+ *   只挡 wreq，挡不住裸 `fetch`）；
+ * ② **判据退化成同义反复** —— 「远端成功」与「远端失败」给同一答案
+ *   ⇒ 那几条用例对「远端是否可用」零区分力。
+ *
+ * ⇒ 统一桩掉 `fetch`（恒 reject ⇒ 必然回退兜底表），让用例**确定性**。
+ * 需要真远端行为的用例自己 `vi.stubGlobal` 覆盖即可。
+ */
+beforeEach(() => {
+  vi.stubGlobal('fetch', () => Promise.reject(new Error('network disabled in unit tests')))
+})
+afterEach(() => {
+  vi.unstubAllGlobals()
+})
 describe('产品配置', () => {
   it('id 是纯小写字母（registry 的 /^[a-z]+$/ 硬约束）', () => {
     expect(QWENWORK_INTL.id).toMatch(/^[a-z]+$/)

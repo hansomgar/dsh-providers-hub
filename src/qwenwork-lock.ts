@@ -78,13 +78,16 @@ export async function fetchQwenworkBalanceForLock(
  * 就是为此存在的）。
  *
  * @param displayName 展示名（错误文案用）。
- * @param providerId  provider id（查 per-provider 窗口用）。
  * @param windowDays  当前生效的窗口天数（**必须与实际筛号同源**，
  *                     否则用户看到「只烧 15 天内的」而实际按 31 天筛）。
+ *
+ * ⚠️ **刻意不收 `providerId`**（2026-11-23 二轮审计修，⚪B-12）：
+ * 原签名有它、注释写「查 per-provider 窗口用」，但函数体内**一次未引用**
+ * —— 窗口天数已由调用方用 `resolveCreditWindow(providerId, reader)` 算好传入。
+ * 留一个不用形参只会让后人以为「这里面有窗口逻辑」，去别处找不到而困惑。
  */
 export function qwenworkLockedError(
   displayName: string,
-  providerId: string,
   windowDays: number,
 ): (reason: BuddyNoAccountReason) => Error {
   return (reason: BuddyNoAccountReason): Error => {

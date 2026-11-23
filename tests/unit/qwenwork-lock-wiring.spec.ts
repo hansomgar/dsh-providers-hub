@@ -109,7 +109,7 @@ describe('★★ QwenWork：`index.ts` 的执行路径（源码级切片）', ()
 })
 
 describe('★★ QwenWork：锁定报错必须按 `reason.kind` 四态分流', () => {
-  const err = qwenworkLockedError('QwenWork (国际版)', 'qwenworkintl', 15)
+  const err = qwenworkLockedError('QwenWork (国际版)', 15)
 
   it('`exhausted` ⇒ QUOTA_EXCEEDED，且文案说清「长期留着、只烧 N 天内」', () => {
     const e = err({ kind: 'exhausted' })
@@ -144,7 +144,7 @@ describe('★★ QwenWork：锁定报错必须按 `reason.kind` 四态分流', (
   })
 
   it('窗口天数来自调用方（与选号同源，不写死）', () => {
-    const e31 = qwenworkLockedError('X', 'qwenworkintl', 31)({ kind: 'exhausted' })
+    const e31 = qwenworkLockedError('X', 31)({ kind: 'exhausted' })
     expect(e31.message).toContain('31 天内到期')
     expect(e31.message).not.toContain('15 天内到期')
   })
@@ -1020,4 +1020,214 @@ describe('★★★ 二轮审计：源码文本级守卫的共性弱点（死分
     }
   })
 
+})
+
+describe('★★★ 二轮审计的 8 个 🟡/⚪（行为级）', () => {
+  /**
+   * ## G-1 🟡B-4 额度耗尽必须**写冷却 + 换号**
+   *
+   * 原实现有一条裸 `if (code === 'QUOTA_EXCEEDED') throw error` ——
+   * 直接抛出、不写标记、不换号。而几十行后的注释写着
+   * 「限流 / **额度**：标记该槽后换下一个」，那段对 quota **永远不可达**。
+   *
+   * 实测对照：
+   * ```
+   * 修复前: httpCalls=1 marks=0  ⇒ 5 次重发都撞同一个空号
+   * 修复后: httpCalls=2 marks=1  ⇒ 换号成功
+   * qiniu : httpCalls=2 marks=2  ⇒ 同款行为（基准）
+   * ```
+   */
+  it('★★★ G-1 额度耗尽必须写冷却并换号', async () => {
+    const { QwenworkAdapter } = await import('../../src/qwenwork-adapter.js')
+    const marks: string[] = []
+    const ad = new QwenworkAdapter({
+      slots: async () => [
+        { id: 'acc-empty', accessToken: 'a' },
+        { id: 'acc-ok', accessToken: 'b' },
+      ],
+      mintTicket: async () => ({
+        token: 'm',
+        baseUrl: 'https://api1.example.fake',
+        expiresAtMs: Date.now() + 3_600_000,
+      }),
+      markLimited: async (id) => { marks.push(id) },
+    })
+    const origFetch = globalThis.fetch
+    let calls = 0
+    globalThis.fetch = (async () => {
+      calls++
+      if (calls === 1) {
+        return new Response(JSON.stringify({ error: { code: 'balance_insufficient' } }),
+          { status: 429, headers: { 'content-type': 'application/json' } })
+      }
+      const sse = 'data: ' + JSON.stringify({ choices: [{ delta: { content: 'ok' } }] }) + '\n\ndata: [DONE]\n\n'
+      return new Response(sse, { status: 200, headers: { 'content-type': 'text/event-stream' } })
+    }) as typeof fetch
+    let chunks = 0
+    try {
+      for await (const c of ad.stream({ model: 'flash', messages: [{ role: 'user', content: 'h' }] })) {
+        if (c) chunks++
+      }
+    } finally { globalThis.fetch = origFetch }
+    expect(calls, '额度耗尽后应换号重发（=1 说明没换）').toBeGreaterThanOrEqual(2)
+    expect(marks, '额度耗尽的号应被写冷却标记').toContain('acc-empty')
+    expect(chunks, '换号后应成功产出内容').toBeGreaterThan(0)
+  })
+
+  /**
+   * ## G-2 🟡B-5 `slotsFor` 必须返回**多个**槽（否则换号是死代码）
+   *
+   * 原实现只返回 `[{ picked }]` —— 永远 1 个槽 ⇒ 适配器的换号循环
+   * 在多账号场景下**永不执行**（多账号汇总 / authOnly 分流 /
+   * 每槽 refresh 去重全是只在单测里可达的死代码）。
+   *
+   * 基准 qiniu：`slots` 返回**全部**可用号 ⇒ 有请求级换号。
+   */
+  it('★★★ G-2 slotsFor 把「其余候选」也返回（供换号）', () => {
+    expect(
+      indexCode,
+      '必须拼上 rest（只返回 picked 一个 ⇒ 换号永不发生）',
+    ).toMatch(/const rest: \{ id: string; accessToken: string \}\[\] = \[\]/)
+    expect(indexCode, '必须返回 [picked, ...rest]').toMatch(
+      /\.\.\.rest,?\s*\]/,
+    )
+  })
+
+  /**
+   * ## G-3 🟡B-7 `resolveModel` 必须「远端 ∪ 静态表」
+   *
+   * 远端**读成功但目录里没有**某模型时（上游收缩 / 手填 id），
+   * 纯远端会让它退化成「裸 id、无窗口、0 档、硬拒图片」，
+   * 而发消息仍可用 —— 用户看到的是「这模型好像不支持这些」。
+   */
+  it('★★★ G-3 resolveModel 走「远端 ∪ 静态表」', async () => {
+    const { QwenworkAdapter } = await import('../../src/qwenwork-adapter.js')
+    const ad = new QwenworkAdapter({
+      slots: async () => [{ id: 'x', accessToken: 'd' }],
+      mintTicket: async () => ({
+        token: 't',
+        baseUrl: 'https://api1.example.fake',
+        expiresAtMs: Date.now() + 3_600_000,
+      }),
+    })
+    const origFetch = globalThis.fetch
+    // 远端 200 但只回一条静态表里没有的模型
+    globalThis.fetch = (async (url: string | URL) => {
+      if (String(url).includes('/api/chat-modes')) {
+        return new Response(JSON.stringify({
+          qwork: [{
+            key: 'remote-only-g3',
+            enable: true,
+            is_vl: true,
+            max_input_tokens: 2_000_000,
+            price_factor: 0.7,
+            i18n: { display_name: { zh: '远端独有' } },
+          }],
+        }), { status: 200, headers: { 'content-type': 'application/json' } })
+      }
+      return new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } })
+    }) as typeof fetch
+    try {
+      // 静态表里的 flash 远端没有 ⇒ 必须仍能解析出完整元数据
+      const local = await ad.resolveModel('qwenworkintl', 'flash')
+      expect(local.name, '不能退化成裸 id').not.toBe('flash')
+      expect(local.name, '应带倍率').toMatch(/ · x[\d.]+$/)
+      expect(local.context?.contextWindow, '窗口不能丢').toBe(1_000_000)
+      expect(local.inputModalities, '图片能力不能丢').toContain('image')
+      expect(local.reasoning?.efforts?.length ?? 0, '档位不能丢').toBe(5)
+    } finally { globalThis.fetch = origFetch }
+  })
+
+  /**
+   * ## G-4 🟡B-11 空目录不得覆盖已有的非空缓存
+   *
+   * 「本 provider 一个账号都没登录」时 `loadCatalog` 返回 `[]`
+   * ⇒ `cached = []` ⇒ `listAllModels()` 读 `cached ?? syncCatalog()`
+   * **空数组不是 undefined** ⇒ 归零。
+   */
+  it('★★★ G-4 无账号时 listAllModels 不得归零', async () => {
+    const { QwenworkAdapter } = await import('../../src/qwenwork-adapter.js')
+    /**
+     * ⚠️⚠️ **必须让 `slots()` 返回空**才能造出「空目录」（2026-11-23 实测教训）。
+     *
+     * 我第一版让 fetch 回 `{qwork: []}` —— 那**造不出空目录**：
+     * `parseQwenworkChatModes` 在远端组为空时会**回退静态表**
+     *（`return models.length > 0 ? models : fallback`）⇒ 仍得 11 条
+     * ⇒ 用例对缺陷**恒真**（变异验证实测：回退缺陷态仍 50 passed）。
+     *
+     * 真实的空目录场景是「本 provider 一个账号都没登录」⇒
+     * `loadCatalogEntries` 的 `if (slots.length === 0) return []` 那条。
+     */
+    let hasAccount = true
+    const ad = new QwenworkAdapter({
+      slots: async () => (hasAccount ? [{ id: 'x', accessToken: 'd' }] : []),
+      mintTicket: async () => ({
+        token: 't',
+        baseUrl: 'https://api1.example.fake',
+        expiresAtMs: Date.now() + 3_600_000,
+      }),
+    })
+    const before = ad.listAllModels().length
+    expect(before, '冷启动应回落到静态表').toBeGreaterThan(0)
+    // 先在有账号状态下读一次，把非空目录写进缓存
+    await ad.listModels('qwenworkintl')
+    expect(ad.listAllModels().length, '有账号时缓存应为非空').toBeGreaterThan(0)
+    // 模拟「账号被删光」⇒ 目录变成空
+    hasAccount = false
+    const listed = await ad.listModels('qwenworkintl')
+    expect(listed, '无账号时选择器应为空（目录门控）').toHaveLength(0)
+    expect(
+      ad.listAllModels().length,
+      '空目录覆盖了缓存 ⇒ 设置页拿不到任何模型、无法逐条打开',
+    ).toBe(before)
+  })
+
+  /**
+   * ## G-5 🟡B-10 单测**不得真发网络**
+   *
+   * `qwenwork-intl.spec.ts` 的 `makeAdapter()` 没注入 fetch 桩 ⇒
+   * `resolveModel` 真的打 `https://qwenwork.ai/api/chat-modes`
+   *（实测外网回 401 ⇒ 静默回退兜底表 ⇒ 断言仍绿 ⇒ **判据同义反复**）。
+   *
+   * ⇒ 那个文件已加 `beforeEach` 桩掉 fetch；这里守「别被删掉」。
+   */
+  it('★★ G-5 qwenwork-intl.spec.ts 必须桩掉 fetch', () => {
+    const specSource = readFileSync(
+      resolve(here, '../../tests/unit/qwenwork-intl.spec.ts'),
+      'utf8',
+    )
+    expect(specSource, '单测必须禁用网络（否则判据同义反复）').toMatch(
+      /vi\.stubGlobal\(.fetch., \(\) => Promise\.reject/,
+    )
+    expect(specSource, '必须清理桩（否则污染同文件其他用例）').toMatch(/vi\.unstubAllGlobals\(\)/)
+  })
+
+  /**
+   * ## G-6 ⚪B-12 `qwenworkLockedError` 不得留死参数
+   *
+   * 原签名有 `providerId`、注释写「查 per-provider 窗口用」，
+   * 但函数体内**一次未引用**（窗口天数已由调用方算好传入）。
+   * 留一个不用形参只会让后人以为那里面有窗口逻辑。
+   */
+  it('★★ qwenworkLockedError 不得留未使用的 providerId 形参', async () => {
+    const { qwenworkLockedError } = await import('../../src/qwenwork-lock.js')
+    // ⚠️ 判据：**两参**可调（(displayName, windowDays)）
+    expect(typeof qwenworkLockedError).toBe('function')
+    expect(qwenworkLockedError.length, '形参应为 2（displayName / windowDays）').toBe(2)
+  })
+
+  /**
+   * ## G-7 🟡B-8 续期必须保住 `machine_id`
+   *
+   * `qwenwork-login.ts` 的注释写着「chat 请求的 COSY 签名与它绑定」。
+   * 续期是**重写整个凭据对象**，漏带就消失了。
+   * 当前零功能影响（推理链路还没读它），但一接签名就静默失效。
+   */
+  it('★★ 续期返回对象必须保留 machine_id', () => {
+    const authSource = readFileSync(resolve(here, '../../src/qwenwork-auth.ts'), 'utf8')
+    const authCode = codeOnly(authSource)
+    expect(authCode, '续期时必须把 machine_id 带过去').toMatch(
+      /credential\.machine_id === undefined[\s\S]{0,80}?machine_id: credential\.machine_id/,
+    )
+  })
 })

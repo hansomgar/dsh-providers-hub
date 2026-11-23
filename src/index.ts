@@ -5168,7 +5168,44 @@ export function apply(ctx: Context): void {
       },
     )
     if (picked.kind === 'account') {
-      return [{ id: picked.account.id, accessToken: picked.credential.access_token }]
+      /**
+       * ★★★ **返回「最优 + 其余」，不能只返回一个**（2026-11-23 二轮审计修，🟡B-5）。
+       *
+       * ## 原实现的问题
+       *
+       * 原先只返回 `[{ picked }]` —— **永远是 1 个槽**。而适配器
+       * `stream()` 的换号循环是「遍历 slots」，只有 1 个就永远换不了号：
+       * 多账号汇总、`authOnly` 分流、每槽 refresh 去重这些分支
+       * 在**生产接线里全是死代码**（只在单测里可达）。
+       *
+       * 实测对照：
+       * ```
+       * qiniu   : slots 返回全部可用号 ⇒ 撞 429 时自动换号（2 次请求）
+       * qwenwork: slots 恒返回 1 个     ⇒ 撞 429 时只能写标记等用户重发
+       * ```
+       *
+       * ## 语义
+       *
+       * `picked` 是 `pickBuddyAccount` 按**余额分档 / 轮换起点 / 严格手动序**
+       * 选出的**最优**账号 —— 必须排第一（那是整套选号策略的产物）。
+       * 其余候选排后面，**只作为 fallback**：当前号撞限流 / 5xx / 认证失败时
+       * 换过去，而不是让用户手动重发。
+       *
+       * ⚠️ 其余候选**按池序**追加、不再排序：换号是 fallback 路径，
+       * 不需要再跑一遍分档（那会是同一语义的第二套判据）。
+       * ⚠️ 解析不出凭据的候选**跳过**（与目录路径那条同款判据）。
+       */
+      const rest: { id: string; accessToken: string }[] = []
+      for (const entry of candidates) {
+        if (entry.id === picked.account.id) continue
+        const credential = await qwenworkintl.currentCredential(entry.credentialRef)
+        if (credential === undefined) continue
+        rest.push({ id: entry.id, accessToken: credential.access_token })
+      }
+      return [
+        { id: picked.account.id, accessToken: picked.credential.access_token },
+        ...rest,
+      ]
     }
     /**
      * ⚠️ **目录路径：选号失败时退回「全部候选」而不是抛错。**
@@ -5190,7 +5227,7 @@ export function apply(ctx: Context): void {
       return fallback.filter((s): s is { id: string; accessToken: string } => s !== undefined)
     }
     // 请求路径：抛错（绝不回落，否则锁定无效）。
-    throw qwenworkLockedError(QWENWORK_INTL.displayName, QWENWORK_INTL.id, resolveCreditWindow(
+    throw qwenworkLockedError(QWENWORK_INTL.displayName, resolveCreditWindow(
       QWENWORK_INTL.id,
       safeCreditWindowReader(pool),
     ).windowDays)(picked.reason ?? { kind: 'no-candidates' })

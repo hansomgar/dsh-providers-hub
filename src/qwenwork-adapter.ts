@@ -351,6 +351,38 @@ function fallbackEntries(): readonly QwenworkCatalogEntry[] {
 export class QwenworkAdapter extends LlmAdapter {
   private readonly product: QwenworkProduct
   private readonly skeletonCatalog: ModelCatalog
+
+    /**
+     * ★★★ **静态表专用的第二个骨架实例**（2026-11-23 二轮审计修，🟡B-7）。
+     *
+     * ## 为什么需要
+     *
+     * `resolveModel` 委托上面的 `skeletonCatalog`（= **远端**目录）。当远端
+     * **读成功**但目录里没有某个模型时（上游收缩目录 / 用户手填 id /
+     * 会话开着而目录变了），那个模型的元数据会**一起退化**：
+     *
+     * ```
+     * resolveModel('flash') = { name:'flash', contextWindow: undefined,
+     *                           efforts: 0, image: UNSUPPORTED_CONTENT }
+     * ```
+     *
+     * —— 即「裸 id、无窗口、无档位、硬拒图片」，而发消息**仍可用**（上游认 id）。
+     *
+     * ## 口径（照 `qoder-adapter.ts:1745-1763` 的成文规则）
+     *
+     * - `listModels`（**菜单**）必须**只**给当前账号真能用的模型 ⇒ **远端独占**；
+     * - `resolveModel`（**元数据**）必须认识「可能正在被使用、但不在当前菜单里」
+     *   的模型 ⇒ **远端 ∪ 静态表**。
+     *
+     * ⚠️ 静态表那一侧**复用骨架自己的装配逻辑**（裸名 / context / reasoning
+     * 三态回退），**不在这里重写一遍** —— 那会是同一语义的第二套判据。
+     *
+     * ⚠️ 与 `skeletonCatalog` **共用同一个 `accountPool`**：黑名单 / 关闭意图
+     * 对两个实例必须同源，否则「关掉的模型」在回退路径上又活了。
+     */
+    private readonly fallbackCatalog: ModelCatalog
+
+    // ⚠️ 静态表实例的赋值见下面构造函数末尾（`this.fallbackCatalog = …`）。
   /**
    * 远端目录缓存。
    *
@@ -395,6 +427,29 @@ export class QwenworkAdapter extends LlmAdapter {
         },
         // ⚠️ 未知 id **保守报 `['text']`**：把「未知」当成「支持」会让 DSH 把图片
         //    投影成上游不接受的形态（`glm-5.3` 实测 400）。
+        unknownModelInputModalities: () => ['text'] as const,
+      },
+    )
+
+    /**
+     * ⚠️⚠️ **必须走 `toCatalogEntry` 转换**（二轮审计二改，我第一次写错了）。
+     *
+     * `fallbackEntries()` 返回的是**本家私有形状** `QwenworkCatalogEntry`
+     *（`supportsImage` / `efforts` / `priceFactor`），而骨架的 `CatalogEntry`
+     * 用的是 `inputModalities` / `contextWindow` / `reasoning`。
+     *
+     * 直接传私有形状时：`id` / `name` / `contextWindow` 恰好同名 ⇒ 能用；
+     * 而 `inputModalities` / `reasoning` 读不到 ⇒ **图片能力与档位全丢**
+     *（实测：`modalities=undefined, efforts=0`）。
+     *
+     * ⇒ 与 `syncCatalogEntries()` 同款：先 `toCatalogEntry` 再交给骨架。
+     */
+    this.fallbackCatalog = createModelCatalog(
+      this.options.accountPool === undefined ? {} : { accountPool: this.options.accountPool },
+      {
+        product: this.product,
+        loadCatalog: () => fallbackEntries().map((m) => toCatalogEntry(m)),
+        syncCatalog: () => fallbackEntries().map((m) => toCatalogEntry(m)),
         unknownModelInputModalities: () => ['text'] as const,
       },
     )
@@ -585,7 +640,41 @@ export class QwenworkAdapter extends LlmAdapter {
      * ⚠️ 骨架的 `resolveModel` 会自己跑 `loadCatalog`（内含远端优先 + 单飞 + TTL），
      * 故这里直接委托即可，**不要**在这里再读一次静态表。
      */
-    return await this.skeletonCatalog.resolveModel(provider, model, signal)
+    /**
+     * ★★★ **远端 ∪ 静态表**（2026-11-23 二轮审计修，🟡B-7）。
+     *
+     * ## 判据（照 `qoder-adapter.ts:1745-1763` 的成文规则）
+     *
+     * | 出口 | 口径 | 理由 |
+     * |---|---|---|
+     * | `listModels`（菜单）| **远端独占** | 只给当前账号真能用的 |
+     * | `resolveModel`（元数据）| **远端 ∪ 静态表** | 要认识「正在被用、但已不在菜单里」的 |
+     *
+     * ## 不做并集的后果（实测）
+     *
+     * 远端读成功但目录收缩后：
+     * ```
+     * resolveModel('flash') = { name:'flash', contextWindow: undefined,
+     *                           efforts: 0, image: UNSUPPORTED_CONTENT }
+     * ```
+     * 而发消息**仍能用**（上游认 id）—— 只是窗口条不渲染、档位菜单消失、
+     * 发图被硬拒。用户看到的是「这个模型好像不支持这些」，而不是「目录变了」。
+     *
+     * ⚠️ **必须先把远端目录读到位再判路由**（TTL 闸门内是 no-op，零额外请求）：
+     *    冷缓存下 `syncCatalog()` 还是兜底表，此时远端独有的模型会被误判成
+     *    「静态表里有」而路由到回退骨架 ⇒ 名字退化成裸 id
+     *    （qoder 第一版漏了这一步，被既有用例当场抓住）。
+     */
+    const remote = await this.loadCatalogEntries()
+    if (remote.some((entry) => entry.id === normalizeQwenworkModelId(model))) {
+      return await this.skeletonCatalog.resolveModel(provider, model, signal)
+    }
+    /**
+     * 远端不认识 ⇒ 交给**静态表专用**的第二个骨架实例。
+     * ⚠️ 它会走完整的三态回退（裸名 / context / reasoning），
+     * **不在这里重写**（那会是同一语义的第二套判据）。
+     */
+    return await this.fallbackCatalog.resolveModel(provider, model, signal)
   }
 
   /**
@@ -631,7 +720,16 @@ export class QwenworkAdapter extends LlmAdapter {
      * ⚠️ 委托骨架的 `resolveModel` 还顺带保证与 `prepareCall` 同源
      *（宿主拿到的模态与适配器自检的模态来自同一份解析结果）。
      */
-    const resolved = await this.skeletonCatalog.resolveModel(this.product.id, model)
+    /**
+     * ⚠️ **复用 `this.resolveModel`**（而不是直接问骨架）——
+     * 这样图片能力判定与 `prepareCall` 拿到的元数据**同源**，
+     * 且自动继承「远端 ∪ 静态表」的并集口径（🟡B-7）。
+     *
+     * 原实现直接问 `skeletonCatalog`（= 纯远端）⇒ 远端读成功但目录收缩时，
+     * 一个「其实能用、只是不在菜单里」的模型会被**硬拒图片**
+     * （实测：`UNSUPPORTED_CONTENT`，而同一模型的 `listModels` 那边明明含 `image`）。
+     */
+    const resolved = await this.resolveModel(this.product.id, model)
     const supportsImage = (resolved.inputModalities ?? []).includes('image')
     if (!supportsImage) {
       throw new LlmError(
@@ -707,6 +805,15 @@ export class QwenworkAdapter extends LlmAdapter {
      * 上一枚认证失败的上游原文（从 `lastAuthError.message` 摘出来，供汇总文案用）。
      */
     let authErrorDetail = ''
+    /**
+     * ★ **最后一枚失败的原始异常**（不限 auth）—— 供循环末尾汇总时保留上游原文。
+     *
+     * ⚠️ 与 `authErrorDetail` 分开：那个只记认证失败（供 AUTH 文案），
+     * 这个记**任何**分类（额度 / 限流 / 服务端），避免「为了让额度能换号
+     * 而删掉提前抛出」这一改造成信息损失。
+     */
+    let lastFailureDetail = ''
+    let lastFailureCode: string | undefined
 
     for (;;) {
       const slot = slots.find((s) => !tried.has(s.id))
@@ -799,8 +906,15 @@ export class QwenworkAdapter extends LlmAdapter {
           )
         }
         throw new LlmError(
-          `qwenworkintl: 所有账号对该模型均受限${limited.length > 0 ? `（${limited.join('、')}）` : ''}`,
-          'QUOTA_EXCEEDED',
+          `qwenworkintl: 所有账号对该模型均受限${limited.length > 0 ? `（${limited.join('、')}）` : ''}`
+          + `${lastFailureDetail.length > 0 ? ` 上游原文：${lastFailureDetail}` : ''}`,
+          /**
+           * ⚠️ 码优先沿用最后一枚 `LlmError` 自己的码（`QUOTA_EXCEEDED` /
+           * `RATE_LIMIT` / `SERVER`…）—— 比一律 `QUOTA_EXCEEDED` 更准
+           *（全是被 5xx 打挂时不该报「额度用尽」）。
+           * 缺席时才回落 `QUOTA_EXCEEDED`（与改动前一致）。
+           */
+          lastFailureCode ?? 'QUOTA_EXCEEDED',
         )
       }
       tried.add(slot.id)
@@ -818,7 +932,30 @@ export class QwenworkAdapter extends LlmAdapter {
         return
       } catch (error) {
         if (delivered) throw error
-        if (error instanceof LlmError && error.code === 'QUOTA_EXCEEDED') throw error
+        /**
+         * ⚠️⚠️ **额度不再提前抛出**（2026-11-23 二轮审计修，🟡B-4）。
+         *
+         * ## 原来的矛盾
+         *
+         * 原代码这里有一条裸的 `if (code === 'QUOTA_EXCEEDED') throw error`
+         * —— 直接抛出、**不写冷却标记、不换号**。
+         * 而几十行后的注释写着「限流 / **额度**：标记该槽后换下一个」，
+         * 那段代码对 quota **永远不可达**。
+         *
+         * 实测（2 个号、一个额度空、一个健康）：
+         * ```
+         * qwenworkintl: httpCalls=1 marks=0 picked=[acc-empty]  ⇒ 5 次都撞同一个空号
+         * qiniu 对照:   httpCalls=2 marks=2                    ⇒ 换号成功
+         * ```
+         *
+         * ⇒ 额度耗尽的账号**不被标记** ⇒ 下一轮选号还会选它 ⇒ 用户每次重发
+         *   都撞同一堵墙；而 qiniu 同场景会换号并冷却。
+         *
+         * ## 修法
+         *
+         * 删掉这条提前抛出，让它和 rate_limit 走同一条「写标记 → 换下一个」。
+         * 错误码仍由循环末尾的汇总给出 `QUOTA_EXCEEDED`（语义不变）。
+         */
         // ⚠️⚠️ **取消 / 超时必须在此立刻抛出，且排在所有分类之前**：
         //    否则 AbortError 不命中任何分类关键词 ⇒ 落兜底 server 分支 ⇒
         //    被当成「换个号再试」⇒ 取消之后继续发请求，最终抛「所有账号均受限」——
@@ -828,6 +965,12 @@ export class QwenworkAdapter extends LlmAdapter {
         }
 
         const info = classifyQwenworkFailure(error)
+        /**
+         * ⚠️ 记录本轮的失败原文（供汇总文案用）。
+         * `LlmError` 的 message 已含上游报文，故直接取 message。
+         */
+        lastFailureDetail = error instanceof Error ? error.message : String(error)
+        lastFailureCode = error instanceof LlmError ? error.code : undefined
         if (info.kind === 'invalid_request') {
           // 400/422：**换号无益**（每个槽发的是同一个体，形状问题与账号无关）
           // ⇒ 带上服务端原文直接上抛。

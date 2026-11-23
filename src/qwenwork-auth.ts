@@ -379,6 +379,23 @@ export class QwenworkIntlAuth extends Service {
         ? {} : { nickname: credential.nickname ?? jwt?.username },
       ...credential.email ?? jwt?.email === undefined
         ? {} : { email: credential.email ?? jwt?.email },
+      /**
+       * ⚠️ **`machine_id` 必须原样带过**（2026-11-23 二轮审计修，🟡B-8）。
+       *
+       * ## 为什么
+       *
+       * `qwenwork-login.ts` 的注释写着「`machine_id` 必须持久化：
+       * 聊天请求的 COSY 签名与它绑定」。续期是**重写整个凭据对象**，
+       * 漏带这个字段 ⇒ 续期后签名所需的机器标识就消失了。
+       *
+       * ⚠️ 当前**零功能影响**（推理链路目前零处读 `machine_id`），
+       * 但那是「还没接 COSY 签名」的偶然结果 —— 一旦按注释去接，
+       * 续期过的账号会**静默**拿不到它。
+       *
+       * ⚠️ 与其它字段同款「没有就不写」（`?? {}`），不编造值。
+       */
+      ...credential.machine_id === undefined
+        ? {} : { machine_id: credential.machine_id },
     }
   }
 

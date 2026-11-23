@@ -844,7 +844,38 @@ function createModelCatalogInner(
       //      全部模型（含新增的），否则用户无法逐条打开（本文件的设计承诺）。
       const closedWholeProvider = deps.accountPool?.providerClosedFor?.(providerId) === true
       const all = await config.loadCatalog()
-      cached = all
+      /**
+       * ⚠️⚠️ **空目录不得覆盖已有的非空缓存**（2026-11-23 二轮审计修，🟡B-11）。
+       *
+       * ## 原实现的问题
+       *
+       * `cached = all` 无条件赋值。而「本 provider 一个账号都没登录」时
+       * 各家的 `loadCatalog` 都返回 `[]`（目录门控：没账号就隐藏）⇒
+       * `cached` 被写成空数组。
+       *
+       * 之后 `listAllModels()` 读 `cached ?? config.syncCatalog()` ——
+       * **空数组不是 `undefined`**，`??` 不会回落 ⇒ 返回 `[]`。
+       *
+       * 实测（真实池）：
+       * ```
+       * 无账号 + 未调过 listModels : listAllModels = 11 条
+       * 无账号 + 调过 listModels   : listAllModels =  0 条   ← 归零
+       * ```
+       *
+       * 后果：设置页的 `model.list` 拿不到任何模型 ⇒ 用户**无法逐条打开**，
+       * 而「关闭整个供应商」那条路径也会以为没有可关的模型。
+       *
+       * ## 判据
+       *
+       * **只在已有非空缓存时**拒绝被空数组覆盖。冷启动（`cached === undefined`）
+       * 或确实空表的渠道（如 agnescode 刻意无静态兜底表）行为**逐字节不变**。
+       *
+       * ⚠️ 这与本文件既有的「刷新失败保留旧值」是同一个取向：
+       * 目录的**退化**（完整 → 空/子集）对用户是净损失，宁可留旧值。
+       */
+      if (all.length > 0 || cached === undefined || cached.length === 0) {
+        cached = all
+      }
       if (closedWholeProvider) return []
 
       const disabled = deps.accountPool?.disabledModelsFor(providerId)
