@@ -34,12 +34,19 @@
  * 轮换节点时整条渠道失效，症状是「所有请求 404」—— 与「没有这个模型」同形，
  * 无法诊断。`fallbackInferBase` 只在响应里**没有** `base_url` 时兜底。
  *
- * ## ⚠️ 图片能力是**逐模型**的（不是整表 true）
+ * ## ⚠️ 图片能力**一律按支持处理**（2026-11-22 用户决定）
  *
- * 实测 `pro` / `glm-5.3` 收图回 **400**，其余 7 个正常。故
- * `supportsImage` 从目录条目读，`resolveImageUrls` 命中不支持的直接抛
- * `UNSUPPORTED_CONTENT`（**不静默丢弃** —— 静默丢弃会让用户以为模型看到了图，
- * 这是 Qoder 图片事故的教训）。
+ * 不读上游 `is_vl`、也不做逐模型覆盖 —— 理由见 `QWENWORK_ASSUME_IMAGE_SUPPORT`
+ * 的文档（两轮实测结论互相矛盾 + 用户实测网页全模型都能看图）。
+ *
+ * ⇒ 声明谁都支持；**真不支持就让上游回 400**（`classifyQwenworkError` 会归
+ * `invalid_request` 并带上游原文，用户能看到可诊断的错误）。
+ *
+ * ⚠️ 但 `resolveImageUrls` 仍会检查**当前解析出的** `inputModalities` 并在
+ * 不支持时抛 `UNSUPPORTED_CONTENT`（**不静默丢弃** —— 静默丢弃会让用户
+ * 以为模型看到了图，这是 Qoder 图片事故的教训）。
+ * 由于现在一律声明支持，该分支实际不会命中，但**保留它**作为将来
+ * 若重新引入逐模型能力判定时的安全网。
  *
  * @module src/qwenwork-adapter.ts
  */
@@ -466,6 +473,26 @@ export class QwenworkAdapter extends LlmAdapter {
    * ⚠️ 徽标**不在这里带**：本方法返回类型只有 `{id, name}`，
    * 而徽标只在 `listModels` 的 `LlmModelInfo.badge` 上有渲染位置。
    */
+  /**
+   * ★ **强制重拉目录**（2026-11-23 终审补，与 `trae-adapter.ts:1098` 同款转发）。
+   *
+   * ## ⚠️⚠️ 光给 `config.refresh` 不够（我第一版就漏了这一半）
+   *
+   * 骨架确实会因此产出 `refresh()` 成员（`model-catalog.ts:865`），
+   * **但适配器必须把它转发出去**，否则后台刷新器拿到的是 `undefined`
+   * ⇒ 「已武装却对这家空转，且**零日志**」（`refreshOf` 返回 `undefined` 时静默跳过）。
+   *
+   * ## ⚠️ 与 `options.refresh` **不是同一件事**（同名纯属巧合，不得合并）
+   *
+   * | | 语义 | 触发源 |
+   * |---|---|---|
+   * | `options.refresh`（构造参数）| **凭据**续期（HTTP 401 后重取 token）| `stream()` 的 auth 分支 |
+   * | `refresh()`（本方法）| **模型目录**重拉 | 20 分钟后台刷新器 / 用户改设置 |
+   */
+  async refresh(): Promise<void> {
+    await this.skeletonCatalog.refresh?.()
+  }
+
   listAllModels(): readonly { id: string; name: string }[] {
     /**
      * ⚠️⚠️ **委托共享骨架**（2026-11-23 审计 P3 修，与 trae / qiniu 同款）。
@@ -507,41 +534,35 @@ export class QwenworkAdapter extends LlmAdapter {
   async resolveModel(
     provider: string,
     model: string,
-    _signal?: AbortSignal,
+    signal?: AbortSignal,
   ): Promise<LlmResolvedModelInfo> {
-    const id = normalizeQwenworkModelId(model)
-    const all = fallbackEntries()
-    const entry = all.find((m) => m.id === id)
-    const resolved: LlmResolvedModelInfo = {
-      provider,
-      id,
-      /**
-       * ⚠️ **必须与 `listModels` 同源**（走 `toCatalogEntry` 的唯一转换点）：
-       * 否则「设置页显示裸名、选择器显示带倍率」= 同一模型两个名字。
-       * ⚠️ 但 `resolveModel` 的回包类型**不带 `badge`**（宿主
-       * `normalizeModelInfo` 逐字段白名单、明确丢弃 badge）⇒ 这里只取 name。
-       */
-      name: entry === undefined ? id : toCatalogEntry(entry).name,
-      inputModalities: entry?.supportsImage === true
-        ? (['text', 'image'] as const)
-        : (['text'] as const),
-    }
-    // ⚠️ 窗口未知**不编造**：0 是「不知道」哨兵，不能当合法窗口下发 ——
-    //    自动压缩会拿它算阈值并抛 TargetPressureConfigError。
-    const contextWindow = entry?.contextWindow ?? 0
-    if (contextWindow > 0) resolved.context = { contextWindow }
-    // ⚠️ 档位为**空**时**不声明**本字段（而不是给 `efforts: []`）：
-    //    声明空数组会让 UI 出现一个没有任何档位的空选择器（opencode IKJJ0V）。
-    const efforts = entry?.efforts ?? []
-    if (efforts.length > 0) {
-      resolved.reasoning = {
-        efforts: efforts.map((effort) => ({
-          id: ReasoningEffortId(effort),
-          name: effort === 'none' ? '关闭' : effort,
-        })),
-      }
-    }
-    return resolved
+    /**
+     * ⚠️⚠️ **必须委托骨架**（2026-11-23 终审修，与 `trae-adapter.ts:1193` 同款）。
+     *
+     * ## 原实现的问题（真实缺陷，注释还宣称「三个出口一致」）
+     *
+     * 原先这里读 `fallbackEntries()` —— **恒读静态兜底表**，而旁边
+     * `listAllModels` 的注释明确宣称「远端优先在三个出口上一致」，
+     * **注释与实现相反**。
+     *
+     * 实测（stub 远端只回一条 `brand-new-model-2027`）：
+     *
+     * ```
+     * 选择器 name : "全新模型 · x0.7"        ← 远端
+     * 全量   name : "全新模型 · x0.7"        ← 远端
+     * resolve name : "brand-new-model-2027"  ← 静态表（裸 id）
+     * resolve contextWindow = undefined      （远端声明 2,000,000）
+     * resolve modalities    = ["text"]       （选择器是 ["text","image"]）
+     * resolve efforts 数    = 0              （选择器 5 档）
+     * ```
+     *
+     * ⇒ 上游新增的模型：选择器里可选，但发请求时**裸 id、无窗口、无档位、无图片**
+     *   ⇒ 用户看到「选了新模型却用不了」。
+     *
+     * ⚠️ 骨架的 `resolveModel` 会自己跑 `loadCatalog`（内含远端优先 + 单飞 + TTL），
+     * 故这里直接委托即可，**不要**在这里再读一次静态表。
+     */
+    return await this.skeletonCatalog.resolveModel(provider, model, signal)
   }
 
   /**
@@ -576,12 +597,22 @@ export class QwenworkAdapter extends LlmAdapter {
     }
     if (refs.size === 0) return undefined
 
-    const all = fallbackEntries()
-    const entry = all.find((m) => m.id === normalizeQwenworkModelId(model))
-    if (entry?.supportsImage !== true) {
+    /**
+     * ⚠️⚠️ **图片能力也必须读骨架**（2026-11-23 终审修）。
+     *
+     * 原先读 `fallbackEntries()` ⇒ 对**远端新增的模型**恒判「不支持图片」
+     * ⇒ 发图恒抛 `UNSUPPORTED_CONTENT`（实测：「模型 "brand-new-model-2027"
+     * 不支持图片输入」），而选择器里该模型的 `inputModalities` 明明含 `image`
+     * —— 两个出口给出相反答案。
+     *
+     * ⚠️ 委托骨架的 `resolveModel` 还顺带保证与 `prepareCall` 同源
+     *（宿主拿到的模态与适配器自检的模态来自同一份解析结果）。
+     */
+    const resolved = await this.skeletonCatalog.resolveModel(this.product.id, model)
+    const supportsImage = (resolved.inputModalities ?? []).includes('image')
+    if (!supportsImage) {
       throw new LlmError(
-        `qwenworkintl: 模型 "${model}" 不支持图片输入`
-        + '（实测 pro / glm-5.3 收图会回 400，其余 7 个模型正常）',
+        `qwenworkintl: 模型 "${model}" 不支持图片输入`,
         'UNSUPPORTED_CONTENT',
       )
     }
@@ -637,6 +668,33 @@ export class QwenworkAdapter extends LlmAdapter {
     for (;;) {
       const slot = slots.find((s) => !tried.has(s.id))
       if (slot === undefined) {
+        /**
+         * ⚠️⚠️ **必须区分「真的用尽」与「全是认证失败」**（2026-11-23 终审修）。
+         *
+         * ## 原实现的问题（实测 `QUOTA_EXCEEDED`）
+         *
+         * 无论什么原因耗尽候选，都报「所有账号对该模型均受限」+ 码 `QUOTA_EXCEEDED`。
+         * 但 `limited` 里可能装的**全是 `(认证失败)`** —— 那与额度毫无关系。
+         *
+         * ⇒ 用户看到「额度用尽」会去**解锁长期积分**（不可撤回的副作用），
+         *   而真因只是「令牌过期 / 续期也没救回来」。这正是本仓红线点名的形态
+         *  （`AUTH` 码会连 message 一起吞掉，让唯一的指路文案消失）。
+         *
+         * ## 判据
+         *
+         * `limited` 里**没有任何一条**是限流/额度类（`(auth)` / `(server)` /
+         * `(transport)` 之外）⇒ 报 `AUTH`，文案直接指向「重新登录」。
+         * 其余情况（至少有一条真限流/额度）⇒ 保持 `QUOTA_EXCEEDED`。
+         */
+        const authOnly = limited.length > 0 && limited.every((l) => l.endsWith('(认证失败)'))
+        if (authOnly) {
+          throw new LlmError(
+            'qwenworkintl: 全部账号认证失败（令牌已失效，自动续期也未能恢复）。'
+            + '请在 Jet Hub 的千问办公国际版面板重新登录 —— 这与积分无关，'
+            + `不要为此解锁长期积分。明细：${limited.join('、')}`,
+            'AUTH',
+          )
+        }
         throw new LlmError(
           `qwenworkintl: 所有账号对该模型均受限${limited.length > 0 ? `（${limited.join('、')}）` : ''}`,
           'QUOTA_EXCEEDED',
@@ -704,8 +762,34 @@ export class QwenworkAdapter extends LlmAdapter {
             refreshed.add(slot.id)
             try {
               await this.options.refresh()
-              this.options.warn?.(`qwenworkintl: 账号 ${slot.id} 认证失败，已尝试续期后重试`)
-              // ⚠️ 续期后**不排除该槽**：重新 resolve 时会拿到新凭据。
+              /**
+               * ⚠️⚠️ **必须撤销 `tried` 才叫「续期后重试」**（2026-11-23 终审修，真缺陷）。
+               *
+               * ## 原实现的双重缺陷（实测复现）
+               *
+               * ```
+               * HTTP 请求次数: 1  |  refresh 调用次数: 1  |  错误码: QUOTA_EXCEEDED
+               * ```
+               *
+               * 1. **续期白调**：`tried.add(slot.id)` 在进循环第一件事就执行（`:665`），
+               *    而这里是永久集合、**全仓没有任何 `tried.delete`**
+               *    ⇒ `continue` 之后 `slots.find(s => !tried.has(s.id))` 找不到该槽
+               *    ⇒ `slot === undefined` ⇒ 直接抛「所有账号均受限」
+               *    ⇒ **续好的凭据一次都没被用上**。
+               * 2. **错误码谎报**：单账号场景下 `tried.size >= slots.length` 立刻成立，
+               *    落到 `QUOTA_EXCEEDED`「所有账号对该模型均受限」
+               *    ⇒ 用户会去**解锁长期积分**（不可撤回！），而真因只是令牌过期、
+               *    而且续期**已经成功**。
+               *
+               * ## 修法
+               *
+               * 续期成功后 `tried.delete(slot.id)` —— 让该槽**重新进入候选**
+               *（凭据已换新，值得再发一次）。
+               * `refreshed` 仍保留 ⇒ 每个槽最多续期一次，不会死循环。
+               */
+              if (tried.delete(slot.id)) {
+                this.options.warn?.(`qwenworkintl: 账号 ${slot.id} 认证失败，已续期并重试`)
+              }
               continue
             } catch (refreshError) {
               this.options.warn?.(
@@ -713,8 +797,27 @@ export class QwenworkAdapter extends LlmAdapter {
               )
             }
           }
-          if (tried.size >= slots.length) throw error
+          /**
+           * ⚠️⚠️ **`limited.push` 必须在 `throw error` 之前**（2026-11-23 终审修）。
+           *
+           * 原顺序（`throw` 在前）会让循环末尾的 `authOnly` 分流**永远不可达**：
+           * 最后一个槽在 `throw` 那一刻就出去了，`limited` 里只剩前面几个，
+           * ⇒「全部账号认证失败」这条汇总判据永远等不到它的输入。
+           *
+           * 变异验证实测：把 `authOnly` 分支改成 `if (false)` 守卫仍然全绿
+           * —— 就是因为这段代码走不到。
+           *
+           * 现在的顺序：**先记账、再决定要不要抛**。
+           */
           limited.push(`${slot.id}(认证失败)`)
+          /**
+           * ⚠️ 最后一个槽**不在这里抛**，而是 `continue` 回循环顶部，
+           * 由 `slot === undefined` 那条出口统一汇总 ——
+           * 只有这样 `authOnly` 分流才拿得到完整的 `limited`。
+           *
+           * ⚠️ 这也让「单账号」那一格变成 AUTH 文案（而不是原始 401 报文）：
+           * 对单账号用户，那句「重新登录」比裸 401 更有用。
+           */
           continue
         }
         if (info.kind === 'server' || info.kind === 'transport') {

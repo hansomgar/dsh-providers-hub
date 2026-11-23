@@ -5011,7 +5011,8 @@ export function apply(ctx: Context): void {
   //    换票与缓存由 `QwenworkIntlAuth.mintTicket` 承担（**单飞 + 提前 60 秒**），
   //    适配器只通过 `mintTicket` 注入点拿票；
   // 3. **模型目录拿不到**（`/algo/api/v2/model/list` 实测 403、`/v1/models` 实测 404）
-  //    ⇒ 适配器的目录恒来自 `QWENWORK_INTL_FALLBACK_MODELS`（9 个模型逐个实测 200）。
+  //    ⇒ 适配器**优先走远端 `/api/chat-modes`**（11 个模型），静态表仅兜底。
+//    （旧结论「拿不到目录端点」已被 2026-11-22 浏览器实测推翻，见 `qwenwork-product.ts`。）
   //
   // 服务名由 QwenworkIntlAuth 依 product.id 派生，注册为 `ctx.qwenworkintlAuth`。
   const qwenworkintl = new QwenworkIntlAuth(ctx)

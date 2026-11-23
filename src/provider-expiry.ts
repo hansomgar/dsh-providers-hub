@@ -484,18 +484,28 @@ export function createProviderExpiry(deps: ProviderExpiryDeps = {}): Readonly<Re
         })
       },
     },
+
     /**
      * **千问办公国际站**（`qwenworkintl`，2026-11-22）。
      *
-     * ⚠️⚠️ **本家的折算判据与所有别家都不同：只看 `daily_credits`。**
+     * ⚠️⚠️ **可用性判据是「可消耗池之和」= `daily + longterm`**
+     * （`buildQwenworkPackages` 的 `total`，见 `qwenwork-credits.ts`）。
      *
-     * 实测（2026-11-22 真机，同一账号）：钱包里有两个池
-     * （`daily 200` 次日 00:00 到期 + `longterm 500` 三个月后到期），
-     * 而推理**只扣 daily** —— 实测 `daily 200 → 199.8368` 而 `longterm` 纹丝不动。
+     * ## 历史纠错（这一段曾写反，别照旧的抄）
      *
-     * ⇒ 若照 buddy 那套「按 remaining 之和判可用」，daily 烧光后仍会算出
-     * 「还有 500」⇒ 账号被排进候选 ⇒ **每轮先 429 一次**（`balance_insufficient`）。
-     * 故原语 `qwenworkExpiry` 的可用性判据是 daily，不是合计。
+     * 旧结论是「推理**只扣** daily ⇒ 判据只看 `daily_credits`」。
+     * 那是**只测了新账号 daily 未耗尽那一段**造成的误判。
+     *
+     * 2026-11-22 晚实测推翻：额度是**瀑布扣减** ——
+     *
+     * - 新账号：`daily 200 / longterm 500` ⇒ 发请求后 daily 降、longterm 不动；
+     * - **daily 耗尽的账号**：`daily 0 / longterm 378` ⇒ 推理照样 200，
+     *   且扣的是 longterm（实测 `378.0028 → 378.0011`）。
+     *
+     * ⇒ 若仍按「只看 daily」判，`daily = 0` 的账号会被判**不可用**，
+     * 而它明明还能烧 longterm（用户看到「没余额」但请求其实能成功）。
+     *
+     * ⚠️ `monthly_credits` **不计入**（订阅额度，免费版恒 0）。
      *
      * ⚠️ 三处必须同改（`WIRED_EXPIRY_PROVIDERS` + 本表 + 折算原语）——
      * `expiry-runtime-parity.spec.ts` 真跑 `apply()` 锁一致性。

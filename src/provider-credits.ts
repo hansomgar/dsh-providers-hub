@@ -557,7 +557,9 @@ export function createProviderCredits(
    *
    * ⚠️⚠️ **三个池必须分开，`total` 取 daily**（`buildQwenworkBalance` 已如此）：
    * 推理**只扣 daily**（实测 `daily 200 → 199.8368` 而 `longterm` 纹丝不动）⇒
-   * 把合计 700 当「每天可用」会让用户在 200 烧完后收到 `balance_insufficient`
+   * ⚠️ **`total` 现取 `daily + longterm`**（瀑布扣减：daily 空了扣 longterm）。
+* 旧结论「total 取 daily」已被 2026-11-22 晚实测推翻。
+* 把合计 700 当「每天可用」会让用户在 200 烧完后收到 `balance_insufficient`
    * 却看到「还有 500」；用合计判耗尽会漏判。
    *
    * ⚠️ **`claim` 刻意不存在**（`dailyCheckin: false`）：逐个探测 16 个候选领取

@@ -234,21 +234,25 @@ export interface QwenworkFallbackModel {
   /**
    * 是否支持图片输入。
    *
-   * ⚠️⚠️ **不用上游的 `is_vl`，用实测覆盖**（2026-11-22 真机）：
+   * ⚠️⚠️ **一律 `true`，不读上游 `is_vl`、也不做逐模型覆盖**
+   * （2026-11-22 用户决定，理由见 `QWENWORK_ASSUME_IMAGE_SUPPORT` 的文档）。
    *
-   * | 模型 | 上游 `is_vl` | 实测 | 采用 |
-   * |---|---|---|---|
-   * | `deepseek-flash` | **false** | ✅ 能看图（回答「红色」正确）| **true** |
-   * | `pro` | **true** | ❌ 4 种图片格式全失败（400/500）| **false** |
-   * | `advanced` / `glm-5.3` | false | ❌ 400 | false（与上游一致）|
+   * 历史沿革（供后人理解为什么这里曾经很复杂）：
+   * - 第一版信上游 `is_vl` ⇒ `deepseek-flash` 被误挡；
+   * - 第二版加实测覆盖表 ⇒ 两轮实测结论互相矛盾；
+   * - 最终**交给上游裁决**：声明支持、真不支持就让上游回 400
+   *   （`classifyQwenworkError` 会归 `invalid_request` 并带上游原文）。
    *
-   * ⇒ 上游这个字段**两个方向都错过**，故用 `QWENWORK_IMAGE_OVERRIDES` 覆盖。
+   * ⚠️ 曾经的 `QWENWORK_IMAGE_OVERRIDES` 常量**已删除** ——
+   * 若在别处看到引用它，那是过时注释。
    */
   supportsImage: boolean
   /**
    * 支持的思考档位（上游 wire 值，**强度序弱 → 强**）。
    *
-   * ⚠️⚠️ **四档全部实测生效**（2026-11-22 真机，每档采样 2~3 次看
+   * ⚠️⚠️ **最终定为五档**（2026-11-22 用户决定，见 `QWENWORK_EFFORTS`）。
+   *
+   * 历史实测（每档采样 2~3 次看
    * `reasoning_tokens` 均值）。以 `pro` 为例，四档严格递增：
    *
    * | 档位 | reasoning_tokens 均值 |

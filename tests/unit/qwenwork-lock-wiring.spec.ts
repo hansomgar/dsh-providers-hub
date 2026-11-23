@@ -350,6 +350,42 @@ describe('★★ 2026-11-23 审计 P2/P3 收尾', () => {
     expect(adapterCode, 'createModelCatalog 的 config 必须给 refresh').toMatch(
       /refresh: async \(\) => \{[\s\S]{0,200}?this\.remoteCatalog = undefined/,
     )
+    /**
+     * ⚠️⚠️ **光给 `config.refresh` 不够**（2026-11-23 终审实测抓到的真漏）：
+     *
+     * 骨架会产出 `refresh()` 成员，**但适配器必须把它转发出去** ——
+     * 否则后台刷新器 `refreshOf(adapter)` 拿到 `undefined` ⇒
+     * 「已武装却对这家**空转**，且零日志」（对比 `trae-adapter.ts:1098`）。
+     *
+     * 我第一版只加了 `config.refresh`、没加转发 ⇒ 运行时 `typeof ad.refresh`
+     * 是 `undefined` —— **原来这条守卫是源码文本级的，抓不到它**。
+     * ⇒ 判据必须同时钉住两半。
+     */
+    expect(adapterCode, '适配器必须转发 skeletonCatalog.refresh').toMatch(
+      /async refresh\(\): Promise<void> \{[\s\S]{0,120}?await this\.skeletonCatalog\.refresh\?\.\(\)/,
+    )
+  })
+
+  /**
+   * ★★★ **行为级**：`refresh()` 成员必须真的存在（不是源码里有那段字）。
+   *
+   * ⚠️ 这条是为了堵上一条的漏洞：上一条是源码文本级判据，
+   * 而「文本在、运行时没有」正是我第一版踩的坑。
+   */
+  it('★★★ 运行时 adapter.refresh 必须是函数', async () => {
+    const { QwenworkAdapter } = await import('../../src/qwenwork-adapter.js')
+    const ad = new QwenworkAdapter({
+      slots: async () => [{ id: 'x', accessToken: 'dummy' }],
+      mintTicket: async () => ({
+        token: 't',
+        baseUrl: 'https://api1.qwenwork.ai',
+        expiresAtMs: Date.now() + 3_600_000,
+      }),
+    })
+    expect(
+      typeof (ad as { refresh?: unknown }).refresh,
+      '没有 refresh 成员 ⇒ 20 分钟后台目录刷新器对本家静默跳过',
+    ).toBe('function')
   })
 
   it('★★★ listAllModels 必须委托骨架（否则 total 恒为静态表条数）', () => {
@@ -367,3 +403,240 @@ describe('★★ 2026-11-23 审计 P2/P3 收尾', () => {
     expect(body, 'listAllModels 里不得再出现 fallbackEntries()').not.toMatch(/fallbackEntries\(\)/)
   })
 })
+
+describe('★★★ 2026-11-23 终审：两条真缺陷的行为级守卫', () => {
+  /**
+   * ## B-1 续期后必须**真的重发**请求
+   *
+   * 子代理审计打穿的形态（实测复现）：
+   *
+   * ```
+   * 修复前: HTTP 1 次 | refresh 1 次 | QUOTA_EXCEEDED「所有账号均受限」
+   * 修复后: HTTP 2 次 | refresh 1 次 | AUTH「HTTP 401」
+   * ```
+   *
+   * 根因：`tried.add(slot.id)` 在进循环第一件事就执行，而全仓**没有任何
+   * `tried.delete`** ⇒ `continue` 之后 `slots.find(s => !tried.has(s.id))`
+   * 找不到该槽 ⇒ 续好的凭据**一次都没被用上**。
+   *
+   * ⚠️ 而旧的守卫全是**源码文本级**（断言「声明了 refresh」「调了 refresh」
+   * 「有 refreshed 去重」），三条在缺陷存在时**全部为真** ⇒ 完全无牙。
+   */
+  it('★★★ B-1 续期后必须真的重发请求（HTTP 被调 ≥2 次）', async () => {
+    const { QwenworkAdapter } = await import('../../src/qwenwork-adapter.js')
+    let httpCalls = 0
+    let refreshCalls = 0
+    const ad = new QwenworkAdapter({
+      slots: async () => [{ id: 'acc-1', accessToken: 'old-token' }],
+      mintTicket: async () => ({
+        token: 'maas',
+        baseUrl: 'https://api1.example.fake',
+        expiresAtMs: Date.now() + 3_600_000,
+      }),
+      refresh: async () => { refreshCalls++ },
+    })
+    const origFetch = globalThis.fetch
+    // 让上游恒回 401 ⇒ 走 auth 分支 ⇒ 触发续期
+    globalThis.fetch = (async () => {
+      httpCalls++
+      return new Response(
+        JSON.stringify({ error: { code: 'unauthorized', message: 'invalid token' } }),
+        { status: 401, headers: { 'content-type': 'application/json' } },
+      )
+    }) as typeof fetch
+    let code: string | undefined
+    try {
+      for await (const _chunk of ad.stream({
+        model: 'flash',
+        messages: [{ role: 'user', content: 'hi' }],
+      })) { /* 消费 */ }
+    } catch (e) {
+      code = (e as { code?: string }).code
+    } finally {
+      globalThis.fetch = origFetch
+    }
+    expect(refreshCalls, '续期应被调用一次').toBe(1)
+    expect(
+      httpCalls,
+      '续期后必须真的重发请求（=1 说明 refresh 白调、tried 从未撤销）',
+    ).toBeGreaterThanOrEqual(2)
+    // ⚠️ 401 不得被谎报成「额度用尽」——那会推用户去解锁长期积分（不可撤回）。
+    expect(code, '401 不能被归成 QUOTA_EXCEEDED').not.toBe('QUOTA_EXCEEDED')
+  })
+
+  /**
+   * ## B-3 远端 ≠ 静态表时，三出口必须一致
+   *
+   * 原实现 `resolveModel` / `resolveImageUrls` 读 `fallbackEntries()`（静态表），
+   * 而 `listModels` / `listAllModels` 读远端 ⇒ **同一模型两个答案**。
+   *
+   * ⚠️ 旧守卫（`model-catalog-parity.spec.ts`）恒真，因为测试里远端失败后
+   * 回落到**同一份静态表** ⇒ 两边逐字相等。必须让远端与静态表**不同**才有牙。
+   */
+  it('★★★ B-3 远端新增模型必须在 resolveModel 上可见', async () => {
+    const { QwenworkAdapter } = await import('../../src/qwenwork-adapter.js')
+    const REMOTE_ONLY = 'brand-new-model-2027'
+    const ad = new QwenworkAdapter({
+      slots: async () => [{ id: 'x', accessToken: 'd' }],
+      mintTicket: async () => ({
+        token: 't',
+        baseUrl: 'https://api1.example.fake',
+        expiresAtMs: Date.now() + 3_600_000,
+      }),
+    })
+    const origFetch = globalThis.fetch
+    // 远端目录只回一条**静态表里没有**的模型
+    globalThis.fetch = (async (url: string | URL) => {
+      const u = String(url)
+      if (u.includes('/api/chat-modes')) {
+        return new Response(JSON.stringify({
+          qwork: [{
+            key: REMOTE_ONLY,
+            enable: true,
+            is_vl: true,
+            max_input_tokens: 2_000_000,
+            price_factor: 0.7,
+            i18n: { display_name: { zh: '全新模型' } },
+          }],
+        }), { status: 200, headers: { 'content-type': 'application/json' } })
+      }
+      return new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } })
+    }) as typeof fetch
+    try {
+      const listed = await ad.listModels('qwenworkintl')
+      const remote = listed.find((m) => m.id === REMOTE_ONLY)
+      expect(remote, '远端模型应出现在选择器里').toBeDefined()
+      // ⚠️ 关键：resolveModel 必须也能解析出它（而不是回裸 id）
+      const resolved = await ad.resolveModel('qwenworkintl', REMOTE_ONLY)
+      expect(
+        resolved.name,
+        'resolveModel 必须与 listModels 同源（不再是裸 id）',
+      ).toBe(remote?.name)
+      expect(resolved.context?.contextWindow, '远端声明的窗口必须透出').toBe(2_000_000)
+      expect(resolved.inputModalities, '远端声明的图片能力必须透出').toContain('image')
+      expect(
+        resolved.reasoning?.efforts?.length ?? 0,
+        '档位也必须透出（静态表里没有这个模型 ⇒ 曾恒 0 档）',
+      ).toBeGreaterThan(0)
+    } finally {
+      globalThis.fetch = origFetch
+    }
+  })
+})
+
+  /**
+   * ## C-1 多账号全认证失败 ⇒ 必须报 AUTH，不得报「额度用尽」
+   *
+   * ⚠️ 为什么单账号那条守卫抓不到 `authOnly` 分流（变异实测无牙）：
+   * 单账号在 auth 分支里走的是 `if (tried.size >= slots.length) throw error`
+   * ⇒ **直接透传原始 401**，根本不进 `limited` 收集，也不走到最后的
+   * 「所有账号均受限」。
+   *
+   * 只有**多账号**才会把每个槽 push 进 `limited` 并在循环末尾汇总
+   * ⇒ 那才是 `authOnly` 分流的唯一可达路径。
+   *
+   * 缺陷后果：全部账号令牌都失效时，用户看到「所有账号对该模型均受限」+
+   * 码 `QUOTA_EXCEEDED` ⇒ 会去**解锁长期积分**（不可撤回），
+   * 而真因与额度毫无关系。
+   */
+  it('★★★ C-1 多账号全认证失败必须报 AUTH（不是 QUOTA_EXCEEDED）', async () => {
+    const { QwenworkAdapter } = await import('../../src/qwenwork-adapter.js')
+    let refreshCalls = 0
+    const ad = new QwenworkAdapter({
+      // 两个账号，都过期
+      slots: async () => [
+        { id: 'acc-1', accessToken: 'old-1' },
+        { id: 'acc-2', accessToken: 'old-2' },
+      ],
+      mintTicket: async () => ({
+        token: 'maas',
+        baseUrl: 'https://api1.example.fake',
+        expiresAtMs: Date.now() + 3_600_000,
+      }),
+      refresh: async () => { refreshCalls++ },
+    })
+    const origFetch = globalThis.fetch
+    globalThis.fetch = (async () =>
+      new Response(
+        JSON.stringify({ error: { code: 'unauthorized', message: 'invalid token' } }),
+        { status: 401, headers: { 'content-type': 'application/json' } },
+      )) as typeof fetch
+    let code: string | undefined
+    let msg = ''
+    try {
+      for await (const _chunk of ad.stream({
+        model: 'flash',
+        messages: [{ role: 'user', content: 'hi' }],
+      })) { /* 消费 */ }
+    } catch (e) {
+      code = (e as { code?: string }).code
+      msg = String((e as Error).message)
+    } finally {
+      globalThis.fetch = origFetch
+    }
+    expect(refreshCalls, '两个号各续期一次').toBe(2)
+    // ⚠️ 核心断言：不得退化成 QUOTA_EXCEEDED
+    expect(
+      code,
+      '全部账号认证失败 ≠ 额度用尽；报 QUOTA_EXCEEDED 会推用户解锁长期积分',
+    ).toBe('AUTH')
+    expect(msg, '文案必须指向「重新登录」').toMatch(/重新登录/)
+    expect(msg, '文案必须明确否定「额度」方向').toMatch(/与积分无关|不要为此解锁/)
+  })
+
+  /**
+   * ## C-2 远端新增模型的图片能力必须从骨架读（不是静态表）
+   *
+   * `resolveImageUrls` 原先读 `fallbackEntries()` ⇒ 对远端新增模型恒判
+   * 「不支持图片」⇒ 发图恒抛 `UNSUPPORTED_CONTENT`，
+   * 而选择器里该模型的 `inputModalities` 明明含 `image` —— **两个出口相反**。
+   */
+  it('★★★ C-2 远端新增模型必须允许发图', async () => {
+    const { QwenworkAdapter } = await import('../../src/qwenwork-adapter.js')
+    const REMOTE_ONLY = 'brand-new-model-2027'
+    const ad = new QwenworkAdapter({
+      slots: async () => [{ id: 'x', accessToken: 'd' }],
+      mintTicket: async () => ({
+        token: 't',
+        baseUrl: 'https://api1.example.fake',
+        expiresAtMs: Date.now() + 3_600_000,
+      }),
+      // 提供一个能返回图片的 readImage，让流程能走到「能力判定之后」
+      readImage: async () => ({ mediaType: 'image/png', data: new Uint8Array([1, 2, 3]) }),
+    })
+    const origFetch = globalThis.fetch
+    globalThis.fetch = (async (url: string | URL) => {
+      if (String(url).includes('/api/chat-modes')) {
+        return new Response(JSON.stringify({
+          qwork: [{
+            key: REMOTE_ONLY,
+            enable: true,
+            is_vl: true,
+            max_input_tokens: 2_000_000,
+            price_factor: 0.7,
+            i18n: { display_name: { zh: '全新模型' } },
+          }],
+        }), { status: 200, headers: { 'content-type': 'application/json' } })
+      }
+      return new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } })
+    }) as typeof fetch
+    try {
+      // 先让 listModels 把远端目录读进缓存
+      await ad.listModels('qwenworkintl')
+      /**
+       * 直接调 resolveImageUrls（protected）—— 它在 `streamVia` 里被调用。
+       * ⚠️ 判据：**不得**抛 `UNSUPPORTED_CONTENT`（那说明还在读静态表）。
+       */
+      const call = (ad as unknown as {
+        resolveImageUrls(m: string, msgs: readonly { content: unknown }[]): Promise<unknown>
+      }).resolveImageUrls.bind(ad)
+      // ⚠️ 形状必须是 `{type:'image', attachment:{attachmentId}}` ——
+      //    `collectImages`（openai-compat.ts:156）只认 `attachmentId`，
+      //    写成 `id` 会收集到 0 张图 ⇒ `resolveImageUrls` 直接返回 undefined
+      //    ⇒ 用例红得毫无意义（我第一版就是这样）。
+      const msgs = [{ content: [{ type: 'image', attachment: { attachmentId: 'a1' } }] }]
+      await expect(call(REMOTE_ONLY, msgs)).resolves.toBeDefined()
+    } finally {
+      globalThis.fetch = origFetch
+    }
+  })
