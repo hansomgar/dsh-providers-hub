@@ -640,3 +640,99 @@ describe('★★★ 2026-11-23 终审：两条真缺陷的行为级守卫', () =
       globalThis.fetch = origFetch
     }
   })
+
+  /**
+   * ## D-1 单账号 401 必须**保留上游原文**（二轮审计抓到的回归）
+   *
+   * 我上一轮为了让 `authOnly` 分流可达，把 auth 分支的 `throw error` 改成了
+   * `continue`（由循环顶部统一汇总）—— **代价是丢了最后一枚上游错误的原文**：
+   *
+   * ```
+   * 改动前: "HTTP 401 — {…"trace_id": "TRACE-123"…}"   ← 原文在
+   * 改动后: "全部账号认证失败…请重新登录"              ← trace_id 没了
+   * ```
+   *
+   * 上游 `trace_id` / 原始报文是**用户找客服时唯一的凭据**，
+   * 也是我们排查「到底是哪种 401」的唯一线索。
+   *
+   * ⚠️ 本仓红线说「`AUTH` 码会连 message 一起吞掉」—— 那条针对**宿主**，
+   * 所以我们在自己这一层更不能主动扩大信息损失。
+   */
+  it('★★★ D-1 单账号 401 必须保留上游原文（trace_id 不能丢）', async () => {
+    const { QwenworkAdapter } = await import('../../src/qwenwork-adapter.js')
+    const ad = new QwenworkAdapter({
+      slots: async () => [{ id: 'a1', accessToken: 't' }],
+      mintTicket: async () => ({
+        token: 'm',
+        baseUrl: 'https://api1.example.fake',
+        expiresAtMs: Date.now() + 3_600_000,
+      }),
+    })
+    const origFetch = globalThis.fetch
+    globalThis.fetch = (async () =>
+      new Response(
+        JSON.stringify({ error: { code: 'unauthorized', trace_id: 'TRACE-XYZ-998' } }),
+        { status: 401, headers: { 'content-type': 'application/json' } },
+      )) as typeof fetch
+    let msg = ''
+    try {
+      for await (const _chunk of ad.stream({
+        model: 'flash',
+        messages: [{ role: 'user', content: 'hi' }],
+      })) { /* 消费 */ }
+    } catch (e) {
+      msg = String((e as Error).message)
+    } finally {
+      globalThis.fetch = origFetch
+    }
+    /**
+     * ⚠️ 核心断言：单账号场景必须**原样透传**上游报文（含 trace_id）。
+     * 单账号没有「汇总」的必要，包装只会损失信息。
+     */
+    expect(msg, '单账号 401 必须保留上游 trace_id').toContain('TRACE-XYZ-998')
+    expect(msg, '必须带上 HTTP 401 这个关键信号').toContain('401')
+  })
+
+  /**
+   * ## D-2 多账号全认证失败：汇总文案**也要**带上游原文
+   *
+   * 多账号时包装是**有价值**的（那句话解释了「为什么全都不行」），
+   * 但**不能因此丢掉诊断信息** ⇒ 汇总文案末尾必须附最后一条上游原文。
+   */
+  it('★★★ D-2 多账号汇总文案也要带上游原文', async () => {
+    const { QwenworkAdapter } = await import('../../src/qwenwork-adapter.js')
+    const ad = new QwenworkAdapter({
+      slots: async () => [
+        { id: 'a1', accessToken: 't1' },
+        { id: 'a2', accessToken: 't2' },
+      ],
+      mintTicket: async () => ({
+        token: 'm',
+        baseUrl: 'https://api1.example.fake',
+        expiresAtMs: Date.now() + 3_600_000,
+      }),
+      refresh: async () => {},
+    })
+    const origFetch = globalThis.fetch
+    globalThis.fetch = (async () =>
+      new Response(
+        JSON.stringify({ error: { code: 'unauthorized', trace_id: 'TRACE-MULTI-42' } }),
+        { status: 401, headers: { 'content-type': 'application/json' } },
+      )) as typeof fetch
+    let msg = ''
+    let code: string | undefined
+    try {
+      for await (const _chunk of ad.stream({
+        model: 'flash',
+        messages: [{ role: 'user', content: 'hi' }],
+      })) { /* 消费 */ }
+    } catch (e) {
+      msg = String((e as Error).message)
+      code = (e as { code?: string }).code
+    } finally {
+      globalThis.fetch = origFetch
+    }
+    expect(code, '多账号全过期应报 AUTH').toBe('AUTH')
+    expect(msg, '汇总文案必须附上游原文（含 trace_id）').toContain('TRACE-MULTI-42')
+    expect(msg, '仍要说清「重新登录」这条出路').toMatch(/重新登录/)
+  })

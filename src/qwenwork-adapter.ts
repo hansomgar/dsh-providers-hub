@@ -664,6 +664,20 @@ export class QwenworkAdapter extends LlmAdapter {
      */
     const refreshed = new Set<string>()
     const limited: string[] = []
+    /**
+     * **最后一枚认证失败的原始异常**（2026-11-23 二轮审计修）。
+     *
+     * ⚠️ 用途有两个：
+     * 1. **单账号时原样透传**（不包装 ⇒ 上游 `trace_id` / 报文一点不少）；
+     * 2. 多账号时把它的 message 尾巴拼进汇总文案。
+     *
+     * ⚠️ 只保留最后一条：多账号场景下「续期之后仍失败」的那条最能反映现状。
+     */
+    let lastAuthError: unknown
+    /**
+     * 上一枚认证失败的上游原文（从 `lastAuthError.message` 摘出来，供汇总文案用）。
+     */
+    let authErrorDetail = ''
 
     for (;;) {
       const slot = slots.find((s) => !tried.has(s.id))
@@ -687,11 +701,53 @@ export class QwenworkAdapter extends LlmAdapter {
          * 其余情况（至少有一条真限流/额度）⇒ 保持 `QUOTA_EXCEEDED`。
          */
         const authOnly = limited.length > 0 && limited.every((l) => l.endsWith('(认证失败)'))
+        /**
+         * ⚠️⚠️ **单账号：直接透传原始错误，不包装**（2026-11-23 二轮审计修）。
+         *
+         * 单账号没有「汇总」的必要 —— 上游说什么就是什么，
+         * 用户拿到的 `trace_id` / 原始报文一点不少。
+         * 包装只对「多账号、各有各的失败」有价值（那句话解释了为什么全都不行）。
+         *
+         * ⚠️ 这也让 `AUTH` 码的语义更准：本仓红线说「`AUTH` 码会连 message
+         * 一起吞掉」—— 那条针对的是**宿主**把 message 换掉的行为，
+         * 所以我们在**自己**这一层更不能主动扩大信息损失。
+         */
+        if (authOnly && slots.length === 1 && lastAuthError !== undefined) {
+          throw lastAuthError
+        }
         if (authOnly) {
+          /**
+           * ⚠️⚠️ **必须保住上游原文**（2026-11-23 二轮审计修，我上一轮引入的回归）。
+           *
+           * ## 问题
+           *
+           * 上一轮把 auth 分支的 `throw error` 改成 `continue`（为了让 `authOnly`
+           * 可达），代价是**丢了最后一枚上游错误的原文**：
+           *
+           * ```
+           * 改动前: "qwenworkintl: HTTP 401 — {…"trace_id": "TRACE-123"…}"
+           * 改动后: "全部账号认证失败…请重新登录"        ← trace_id 没了
+           * ```
+           *
+           * 上游的 `trace_id` / 原始报文是**用户找客服时唯一的凭据**，
+           * 也是我们排查「到底是哪种 401」的唯一线索。
+           * 本仓红线里那条「文案本身就是出路」的反面同样成立：
+           * **不能为了给出一条出路而抹掉诊断信息**。
+           *
+           * ## 修法
+           *
+           * 从 `limited` 的记账里带上原始 message 的尾巴
+           *（`authErrorDetail` 在 auth 分支里抓的那个）。
+           * 单账号时更直接：**原样透传那条错误**（没有汇总的必要，
+           * 保持「上游说什么就是什么」）。
+           */
+          const detail = authErrorDetail.length > 0
+            ? ` 上游原文：${authErrorDetail}`
+            : ''
           throw new LlmError(
             'qwenworkintl: 全部账号认证失败（令牌已失效，自动续期也未能恢复）。'
             + '请在 Jet Hub 的千问办公国际版面板重新登录 —— 这与积分无关，'
-            + `不要为此解锁长期积分。明细：${limited.join('、')}`,
+            + `不要为此解锁长期积分。明细：${limited.join('、')}${detail}`,
             'AUTH',
           )
         }
@@ -810,6 +866,12 @@ export class QwenworkAdapter extends LlmAdapter {
            * 现在的顺序：**先记账、再决定要不要抛**。
            */
           limited.push(`${slot.id}(认证失败)`)
+          /**
+           * ⚠️ 抓住上游原文（见 `lastAuthError` 声明的理由）。
+           * `error` 是 `streamVia` 抛上来的原始异常，其 message 里带着上游报文。
+           */
+          lastAuthError = error
+          authErrorDetail = String((error as Error).message ?? error)
           /**
            * ⚠️ 最后一个槽**不在这里抛**，而是 `continue` 回循环顶部，
            * 由 `slot === undefined` 那条出口统一汇总 ——
