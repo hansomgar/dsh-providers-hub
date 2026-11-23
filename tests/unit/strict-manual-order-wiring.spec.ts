@@ -43,6 +43,9 @@ import * as autoclawProductModule from '../../src/autoclaw-product.js'
 import * as magicrewProductModule from '../../src/magicrew-product.js'
 import * as astudioProductModule from '../../src/astudio-product.js'
 import * as officeaceProductModule from '../../src/officeace-product.js'
+// ⚠️ qwenworkintl 是**自建 slots() 闭包**（不经 balance 块），也必须进这张映射表，
+//    否则下面「自建闭包 ∪ balance 块」的并集看不到它（2026-11-23 审计）。
+import * as qwenworkProductModule from '../../src/qwenwork-product.js'
 
 const INDEX_SOURCE = readFileSync(
   fileURLToPath(new URL('../../src/index.ts', import.meta.url)),
@@ -75,6 +78,7 @@ const PRODUCT_CONSTANTS: Record<string, unknown> = Object.assign(
   magicrewProductModule,
   astudioProductModule,
   officeaceProductModule,
+  qwenworkProductModule,
 )
 
 interface BalanceBlock {
@@ -131,8 +135,60 @@ describe('严格手动顺序：src/index.ts 装配 ↔ BALANCE_TIERED_PROVIDERS 
     }
   })
 
+  /**
+   * ★★★ 双向差集必须为空。
+   *
+   * ## ⚠️⚠️ 2026-11-23 修正：本用例原先的判据**有假红**
+   *
+   * 它假设「凡是按余额分档的渠道，index.ts 里必有 `balance: { kind: 'buddy' }`
+   * 装配块」。这个假设**不成立**：
+   *
+   * - `qwenworkintl` 是**自建 `slots()` 闭包**直接调 `pickBuddyAccount`，
+   *   不经过 `credential-resolver` 的 `balance` 字段 ⇒ 没有那个块；
+   * - 但它**确实**走 `rankBuddyAccountsByBalance`，后端也**确实**读
+   *   `pool.strictManualOrder(...)`。
+   *
+   * ⇒ 旧判据会把它判成 `extra`（「面板会渲染一个点了没用的开关」）——
+   * **恰好说反了**：真实情况是开关**根本没渲染**（漏登记），而后端一直准备着。
+   *
+   * 修法：判据从「有没有 balance 块」扩成「**有没有 evidence**」——
+   * balance 块 **或** 自建闭包里真的调了 `pickBuddyAccount`。
+   * 两者取并集后，`extra` 才真的等于「表里有但代码根本不按余额分档」。
+   */
   it('★★ 双向差集必须为空（漏一家 ⇒ 该渠道的开关静默消失）', () => {
-    const assembled = blocks.map((block) => providerIdOf(block.product))
+    const viaBalanceBlock = blocks.map((block) => providerIdOf(block.product))
+
+    /**
+     * 自建 `slots()` 闭包的渠道：不经 `balance` 块，但仍按余额分档。
+     *
+     * ⚠️ 判据是「真的调了 `pickBuddyAccount`」而不是「表里有」——
+     * 否则这条就退化成同义反复（表里有什么就认定什么，永远绿）。
+     */
+    const pickBuddyCallers: string[] = []
+    for (const [constName, value] of Object.entries(PRODUCT_CONSTANTS)) {
+      const id = (value as { id?: unknown }).id
+      if (typeof id !== 'string' || id.length === 0) continue
+      /**
+       * 在 index.ts 里找「该 provider 的装配点之后紧跟着 pickBuddyAccount 调用」。
+       *
+       * ⚠️⚠️ **必须遍历该常量的所有出现位置，不能只取第一次**（2026-11-23 实测）：
+       * 第一次出现往往在 **import 语句**附近（`QWENWORK_INTL.id` 在 L627 就出现了
+       * 一次），用一个固定窗口切下去根本够不到真正的装配点（L3571）
+       * ⇒ 判据恒假、且**看不出为什么**。
+       *
+       * 判据：以每个命中位置为起点切 3000 字符窗口，任一窗口里出现
+       * `pickBuddyAccount<` 即认定「该渠道按余额分档」。
+       */
+      const anchor = new RegExp(`${constName}\\.id`, 'g')
+      let hit = false
+      for (const m of CODE.matchAll(anchor)) {
+        const window = CODE.slice(m.index, m.index + 3000)
+        if (/pickBuddyAccount</.test(window)) { hit = true; break }
+      }
+      if (hit) pickBuddyCallers.push(id)
+    }
+
+    const assembled = [...new Set([...viaBalanceBlock, ...pickBuddyCallers])]
     const missing = assembled.filter((id) => !BALANCE_TIERED_PROVIDERS.includes(id))
     const extra = BALANCE_TIERED_PROVIDERS.filter((id) => !assembled.includes(id))
     expect(

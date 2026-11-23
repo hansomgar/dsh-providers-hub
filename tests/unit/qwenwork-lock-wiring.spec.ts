@@ -28,7 +28,7 @@ import { readFileSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
-import { PROVIDER_REGISTRY } from '../../src/provider-registry.js'
+import { BALANCE_TIERED_PROVIDERS, isBalanceTieredProvider, PROVIDER_REGISTRY } from '../../src/provider-registry.js'
 import { QwenworkIntlAuth } from '../../src/qwenwork-auth.js'
 import { qwenworkLockedError } from '../../src/qwenwork-lock.js'
 import { QWENWORK_INTL } from '../../src/qwenwork-product.js'
@@ -232,5 +232,51 @@ describe('★★★ 轮换起点接线（2026-11-23 真实缺陷：从未接线�
     expect(indexCode).toMatch(
       /const rotationStartId = sessionId === undefined\s*\n\s*\? undefined/,
     )
+  })
+})
+
+describe('★★★ 2026-11-23 审计：三处 P1 漏接线', () => {
+  /**
+   * ## 为什么这三条必须单独守
+   *
+   * 本家为了复用 `BuddyBalanceSelector` 而**绕过**了 `credential-resolver`
+   * 的 `balance` 字段、自建 `slots()` 闭包。那个决定本身有注释，
+   * 但注释只覆盖了「分档」—— 而 resolver 那套编排**顺带承担**了三条腿：
+   *
+   * | 腿 | 漏了会怎样 |
+   * |---|---|
+   * | 账号级封禁过滤 | 被上游封的号仍被选中，错误被误分类 |
+   * | 全限流判定 | 全号被限流时报「请登录」（把「等几分钟」谎报成「没账号」）|
+   * | `BALANCE_TIERED_PROVIDERS` | 前端「严格手动顺序」开关**整个不渲染** |
+   *
+   * 三条的共同特征：**tsc 全绿、既有测试全绿、只有用户能发现**。
+   * 尤其第三条 —— 既有 `strict-manual-order-wiring.spec.ts` 只扫
+   * `kind: 'buddy'` 装配块，而本家是自建闭包 ⇒ 双向差集看不到它。
+   */
+  it('★★★ 账号级封禁必须过滤（isPolicyBlockedAccount）', () => {
+    // ⚠️ 封禁是**整号**不可用、与模型无关，必须与逐模型限流判据分开。
+    //    漏了 ⇒ 被封的号仍被选中，每次请求撞上游拒绝且错误分类错。
+    expect(
+      indexCode,
+      '候选筛选必须调 isPolicyBlockedAccount',
+    ).toMatch(/isPolicyBlockedAccount\(entry\)/)
+  })
+
+  it('★★★ 全限流必须报解禁时刻，不能谎报「请登录」', () => {
+    // ⚠️ 漏了 ⇒ 落 MISSING_CREDENTIAL，文案是「点『登录』」——
+    //    而账号好得很，解禁时刻早写在 modelRateLimits 里。
+    expect(
+      indexCode,
+      '候选为空且请求路径时必须调 throwIfAllAccountsRateLimited',
+    ).toMatch(/throwIfAllAccountsRateLimited\(QWENWORK_INTL,\s*modelId\)/)
+  })
+
+  it('★★★ 必须在 BALANCE_TIERED_PROVIDERS 里（否则开关不渲染）', () => {
+    // ⚠️ 后端一直读 pool.strictManualOrder(...)，只是前端不给这个开关。
+    expect(
+      BALANCE_TIERED_PROVIDERS.includes('qwenworkintl'),
+      '不在表里 ⇒ 「严格手动顺序」开关静默消失',
+    ).toBe(true)
+    expect(isBalanceTieredProvider('qwenworkintl')).toBe(true)
   })
 })

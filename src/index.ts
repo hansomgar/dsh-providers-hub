@@ -35,7 +35,7 @@ import { registerZcodeLlm } from './zcode-adapter.js'
 import { ZCODE } from './zcode-product.js'
 import { ZCODE_CAPTCHA_FALLBACK, type ZcodeCaptchaConfig } from './zcode-captcha.js'
 import type { CarrierOutcome } from './captcha-carrier.js'
-import { AccountPool, allAccountsRateLimitedForModel } from './account-pool.js'
+import { AccountPool, allAccountsRateLimitedForModel, isPolicyBlockedAccount } from './account-pool.js'
 import { geminiFetchForAccount, setGeminiProxyPool } from './gemini-proxy.js'
 import { qoderFetchForAccount, setQoderProxyPool } from './qoder-proxy.js'
 import { qoderTrafficGuardEnabled } from './qoder-traffic-guard.js'
@@ -5071,18 +5071,55 @@ export function apply(ctx: Context): void {
      */
     slots: async (modelId?: string, sessionId?: string) => {
       const entries = await pool.listAccounts(QWENWORK_INTL.id)
-      // ⚠️ 先按「启用 + 模型限流」筛候选（与其余 provider 同一判据）。
+      /**
+       * ⚠️ 先按「启用 + 账号级封禁 + 模型限流」筛候选（与其余 provider 同一判据）。
+       *
+       * ⚠️⚠️ **账号级封禁必须单独判**（2026-11-23 补，真实漏接线）：
+       * `credential-resolver.ts` 里那套候选筛选有**两条独立**的排除腿——
+       * ① 账号级封禁（`isPolicyBlockedAccount`，上游以「违规」为由封了该号）；
+       * ② 逐模型限流（`modelRateLimits`）。
+       * 两者**刻意分开**（`credential-resolver.ts` 的注释逐字写了「对抗审计 E8
+       * 实测的形态」）：封禁是**整号**不可用、与模型无关，混进限流判据会
+       * 让「换个模型就能用」的错觉成立。
+       *
+       * 漏判的后果：被上游封禁的号**仍会被选中**，每次请求都撞上游拒绝，
+       * 且被误分类成别的错误（用户完全看不出是封号）。
+       */
+      const now = Date.now()
       const candidates = entries.filter((entry) => {
         if (!entry.enabled) return false
+        // ⚠️ 账号级封禁（整号不可用，与模型无关）。⚠️ 该函数只收 `entry`
+        //    （内部用 `isValidResetAtMs` 判有效期），**不要**多传 `now`。
+        if (isPolicyBlockedAccount(entry)) return false
         // ⚠️ 模型级限流：`modelId` 缺省时**不查**（目录路径刻意不传 ——
         //    传了会让被限流的账号把整个目录一起拖空）。
         if (modelId !== undefined && modelId.length > 0) {
           const resetAt = entry.modelRateLimits?.[modelId]
-          if (typeof resetAt === 'number' && resetAt > Date.now()) return false
+          if (typeof resetAt === 'number' && resetAt > now) return false
         }
         return true
       })
-      if (candidates.length === 0) return []
+      if (candidates.length === 0) {
+        /**
+         * ⚠️⚠️ **候选为空时必须先区分「全被限流」与「真的没账号」**
+         * （2026-11-23 补，真实漏接线，IKJOZ9 的同型形态）。
+         *
+         * 基线各家都接了 `throwIfAllAccountsRateLimited`（trae / workbuddy /
+         * qoder / magicrew …）。漏了它，本家在「所有账号对该模型都在限流中」
+         * 时会一路落到适配器抛 `MISSING_CREDENTIAL`，文案是
+         * 「没有可用账号。请在 Jet Hub 点『登录』」—— **完全错误的归因**：
+         * 账号好得很，只是等几分钟就解禁（解禁时刻早就写在 `modelRateLimits` 里）。
+         *
+         * 用户会去重登一个本来没问题的号，做完仍然报错，且看不出自己白做了一轮。
+         *
+         * ⚠️ 只在**请求路径**（有 `modelId`）判：目录路径拿不到模型上下文，
+         * 那里抛错会让整个 provider 的模型列表变成一条报错文案。
+         */
+        if (modelId !== undefined && modelId.length > 0) {
+          throwIfAllAccountsRateLimited(QWENWORK_INTL, modelId)
+        }
+        return []
+      }
       /**
        * ★★★ **轮换起点的四个入参**（2026-11-23 补，真实缺陷修复）。
        *

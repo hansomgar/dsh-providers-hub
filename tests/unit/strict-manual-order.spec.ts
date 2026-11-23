@@ -162,7 +162,13 @@ describe('isBalanceTieredProvider（哪些渠道会做余额分档）', () => {
     for (const id of BALANCE_TIERED_PROVIDERS) {
       expect(isBalanceTieredProvider(id), id).toBe(true)
     }
-    expect(BALANCE_TIERED_PROVIDERS).toHaveLength(14)
+    // ⚠️ 2026-11-23 加 qwenworkintl（14 → 15）：审计发现它**确实**走
+    //    `rankBuddyAccountsByBalance`（自建 slots 闭包调 `pickBuddyAccount`），
+    //    却漏登记在这张表里 ⇒ 前端「严格手动顺序」开关整个不渲染，
+    //    而后端一直在读 `pool.strictManualOrder(...)`。
+    expect(BALANCE_TIERED_PROVIDERS).toHaveLength(15)
+    // ⚠️ 反向：新加的这家必须在表里，且语义上确实分档。
+    expect(isBalanceTieredProvider('qwenworkintl')).toBe(true)
   })
 
   it('纯手动序的渠道不在表里（拖拽对它们是绝对的）', () => {

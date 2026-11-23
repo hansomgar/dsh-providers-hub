@@ -1616,6 +1616,30 @@ export const BALANCE_TIERED_PROVIDERS: readonly string[] = Object.freeze([
   'magicrew',
   'magicrewintl',
   'astudio',
+  /**
+   * ⚠️ 千问办公国际站（2026-11-23 补，**真实漏接线**）。
+   *
+   * 它确实走 `rankBuddyAccountsByBalance`（`index.ts` 的 `slots()` 闭包调
+   * `pickBuddyAccount` ⇒ `BuddyBalanceSelector.select` ⇒ 该函数），
+   * 语义上就属于这张表。
+   *
+   * ## 漏登记的后果
+   *
+   * 前端渲染「严格手动顺序」开关的判据是 `isBalanceTieredProvider(provider)`
+   * （`plugin-src/client/credits-capabilities.js:144-146`）
+   * ⇒ 不在表里**开关整个不渲染**，而**后端早就在读它**
+   * （`index.ts` 的 `strictManualOrder: pool.strictManualOrder?.(…) === true`）。
+   *
+   * 症状：用户在别家见过这个开关，换到本家找不到 —— 不是"不支持"，
+   * 而是**界面不给他这个选项**。
+   *
+   * ## ⚠️ 为什么既有守卫没抓到
+   *
+   * `tests/unit/strict-manual-order-wiring.spec.ts` 只扫描 `kind: 'buddy'`
+   * 的装配块，而本家是**自建 `slots()` 闭包**（不经 `credential-resolver`
+   * 的 `balance` 字段）⇒ 双向差集都看不到它。已补专项守卫。
+   */
+  'qwenworkintl',
 ])
 
 /** 该渠道的选号是否会先按余额到期档位排序（见 {@link BALANCE_TIERED_PROVIDERS}）。 */
