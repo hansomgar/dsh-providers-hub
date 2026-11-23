@@ -5223,6 +5223,30 @@ export function apply(ctx: Context): void {
     markLimited: async (slotId, modelId, resetAtMs) => {
       await pool.updateModelRateLimit(slotId, modelId, resetAtMs)
     },
+    /**
+     * ★ **推理 401 时按需续期**（2026-11-23 审计 P2 补）。
+     *
+     * 与 `traeAdapter` / `buddyAdapter` / `qoderAdapter` 的装配同款：
+     * 取一个可用账号、调它的 `refreshAccountCredential`。
+     *
+     * ⚠️ **必须按「账号池里的具体账号」走**：`refreshAccountCredential` 读写的是
+     * `QWENWORKINTL_ACCOUNT_XXX`，而 `service.refresh()` 那种单凭据接口
+     * 会刷到已废弃的默认 ref 上（codearts 那段注释踩过这个坑）。
+     *
+     * ⚠️ 漏了这条腿的后果：令牌一过期，用户发消息直接看到 401，
+     * 而所有自愈（定时器 / 积分 / 面板按钮）都**不在推理路径上**
+     * ⇒ 只能干等下一轮定时器或自己回面板点。
+     */
+    refresh: async () => {
+      const available = await pool.getAvailableAccount(QWENWORK_INTL.id, '')
+      if (available) {
+        await qwenworkintl.refreshAccountCredential(
+          available.entry.credentialRef,
+          pool,
+          available.entry.id,
+        )
+      }
+    },
     // 图片走 `readImage` 单一路径，逐模型按兜底表的 `supportsImage` 声明。
     // ⚠️ 实测 `pro` / `glm-5.3` **不收图**（400），其余 7 个正常 ⇒ 逐条声明，
     //    绝不整表一律 true（本仓硬约定：声明支持就必须真支持）。

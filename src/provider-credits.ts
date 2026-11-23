@@ -572,6 +572,24 @@ export function createProviderCredits(
   qwenworkintl: {
     fetchBalanceDetailed: async (credential) =>
       await fetchQwenworkBalanceDetailed(credential as QwenworkCredential),
+    /**
+     * ★ **「没有签到接口」的明确文案**（2026-11-23 审计 P2 补，与 marvis 同款）。
+     *
+     * ## 为什么要显式写
+     *
+     * 缺席时 `credits.claimAll` 回**旧的** `unsupported provider: qwenworkintl`
+     * —— 那句是给「开发者接错表」看的诊断串，不是给用户看的说明。
+     * 用户点「一键领取」看到它只会以为插件坏了。
+     *
+     * ⚠️ 本家**确实没有**领取端点（16 个候选全 404，国内站那套营销端点在国际站
+     * 也是 404）⇒ 额度由**服务端每日自动发放**。这不是缺陷，是产品形态。
+     *
+     * ⚠️ 与 `dailyCheckin: false` **成对**：registry 那个位决定**要不要渲染按钮**，
+     * 本字段决定「万一被调用时说什么」。两者缺一个都会让用户看到不该看的东西
+     *（缺本字段 ⇒ 看到 `unsupported provider`；缺那个位 ⇒ 渲染一个点了必失败的按钮）。
+     */
+    claimUnavailableReason:
+      'QwenWork (国际版) 没有每日签到接口：200 每日额度由服务端自动发放，无需手动领取',
   },
 
     /**

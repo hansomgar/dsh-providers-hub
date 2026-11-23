@@ -280,3 +280,90 @@ describe('★★★ 2026-11-23 审计：三处 P1 漏接线', () => {
     expect(isBalanceTieredProvider('qwenworkintl')).toBe(true)
   })
 })
+
+describe('★★ 2026-11-23 审计 P2/P3 收尾', () => {
+  /**
+   * ## 这四项都是「基准渠道有、本家没有」的差异
+   *
+   * | 项 | 后果 |
+   * |---|---|
+   * | `options.refresh` | 推理 401 时不续期，只能等定时器/回面板手点 |
+   * | `claimUnavailableReason` | 点「一键领取」看到 `unsupported provider`（诊断串，不是用户文案）|
+   * | `config.refresh` | 不参与 20 分钟后台目录刷新 |
+   * | `listAllModels` 委托骨架 | `provider.status` 的 total 恒为静态表条数（上游加模型不跟）|
+   */
+  it('★★★ 适配器必须支持 options.refresh（推理 401 时续期）', () => {
+    // ⚠️ 本家**有**真实 refresh 端点 ⇒ 「这个号救得回来」，
+    //    不接就等于让用户看一条本可避免的 401。
+    const adapterSource = readFileSync(
+      resolve(here, '../../src/qwenwork-adapter.ts'),
+      'utf8',
+    )
+    const adapterCode = codeOnly(adapterSource)
+    expect(adapterCode, 'options 类型必须有 refresh').toMatch(/readonly refresh\?: \(\) => Promise<void>/)
+    // ⚠️ 必须真的在 auth 分支里调（只声明不调用 = 死字段）。
+    expect(adapterCode, 'auth 分支必须调用 this.options.refresh()').toMatch(
+      /this\.options\.refresh !== undefined[\s\S]{0,200}?await this\.options\.refresh\(\)/,
+    )
+    // ⚠️ 每槽只试一次（refresh 是账号级副作用，反复调会重复轮换 refresh_token）。
+    expect(adapterCode, '必须用 refreshed 集合去重').toMatch(/refreshed\.has\(slot\.id\)/)
+  })
+
+  it('★★ refresh 必须在 index.ts 装配（按账号池里的具体账号）', () => {
+    // ⚠️ 必须走 `refreshAccountCredential(ref, pool, id)`，
+    //    不能用单凭据的 `service.refresh()`（那会刷到已废弃的默认 ref 上）。
+    //
+    // ⚠️⚠️ **锚点必须是「本家的组合片段」，不能用裸符号**（变异验证实测无牙）：
+    // - 裸 `/qwenworkintl\.refreshAccountCredential\(/` 在 `SELF_HEAL` 等别处也出现；
+    // - 裸 `/refresh: async \(\) => \{/` 在**其他渠道**的装配里到处都是。
+    // 两条同时被别处的巧合命中 ⇒ 删掉本家的装配，守卫仍然绿。
+    // ⇒ 要求「`refresh:` 之后 400 字符内出现 `qwenworkintl.refreshAccountCredential(`」，
+    //    且必须带上 `pool,` 与 `available.entry.id` 这两个参数锚点
+    //    （证明走的是**账号级**续期而非单凭据 `service.refresh()`）。
+    expect(indexCode).toMatch(
+      /refresh: async \(\) => \{[\s\S]{0,400}?qwenworkintl\.refreshAccountCredential\([\s\S]{0,200}?available\.entry\.credentialRef,\s*pool,\s*available\.entry\.id/,
+    )
+  })
+
+  it('★★★ claimUnavailableReason 必须写（否则用户看到 unsupported provider）', async () => {
+    const { createProviderCredits } = await import('../../src/provider-credits.js')
+    // ⚠️ 表由 `createProviderCredits()` 现造（与运行时同一份工厂）。
+    const table = createProviderCredits()
+    const entry = table['qwenworkintl']
+    expect(entry, 'provider-credits 里必须有 qwenworkintl').toBeDefined()
+    expect(
+      entry?.claimUnavailableReason,
+      '缺它 ⇒ 点「一键领取」看到 unsupported provider 报文',
+    ).toBeTypeOf('string')
+    // ⚠️ 文案必须说清「服务端自动发放」，不能只说「不支持」。
+    expect(entry?.claimUnavailableReason).toMatch(/自动发放|无需手动/)
+  })
+
+  it('★★ config.refresh 必须给（否则不进后台目录刷新器）', () => {
+    const adapterSource = readFileSync(
+      resolve(here, '../../src/qwenwork-adapter.ts'),
+      'utf8',
+    )
+    const adapterCode = codeOnly(adapterSource)
+    // ⚠️ 骨架用 `...config.refresh === undefined ? {} : {...}` 决定要不要产出 refresh 成员
+    //    ⇒ 不给这一项就整个不在刷新器里。
+    expect(adapterCode, 'createModelCatalog 的 config 必须给 refresh').toMatch(
+      /refresh: async \(\) => \{[\s\S]{0,200}?this\.remoteCatalog = undefined/,
+    )
+  })
+
+  it('★★★ listAllModels 必须委托骨架（否则 total 恒为静态表条数）', () => {
+    // ⚠️ 原实现恒读 `fallbackEntries()` ⇒ 上游加模型后 provider.status 不跟。
+    const adapterSource = readFileSync(
+      resolve(here, '../../src/qwenwork-adapter.ts'),
+      'utf8',
+    )
+    const adapterCode = codeOnly(adapterSource)
+    expect(adapterCode, 'listAllModels 必须读 skeletonCatalog').toMatch(
+      /this\.skeletonCatalog\.listAllModels\(\)/,
+    )
+    // ⚠️ 反向：不得再直接读兜底表（那是缺陷形态）。
+    const body = /listAllModels\(\)[\s\S]{0,900}?\n  \}/.exec(adapterCode)?.[0] ?? ''
+    expect(body, 'listAllModels 里不得再出现 fallbackEntries()').not.toMatch(/fallbackEntries\(\)/)
+  })
+})

@@ -171,6 +171,32 @@ export interface QwenworkAdapterOptions {
   readonly accountPool?: AccountPool
   /** 标记某账号在某模型上被限流到某时刻。 */
   readonly markLimited?: (slotId: string, modelId: string, resetAtMs: number) => Promise<void>
+  /**
+   * **静默续期凭据**（2026-11-23 审计 P2 补，基准 `trae` / `buddy` / `qoder` 都有）。
+   *
+   * ## 为什么需要这条腿
+   *
+   * 本家的推理路径原本**只在 `auth` 分支换号、从不续期**：
+   * 一个 `access_token` 过期的账号会被标记成「认证失败」然后跳过，
+   * 试完全部槽后**透传上游原文**。
+   *
+   * ⚠️ 而本家**有真实 refresh 端点**
+   * （`POST /api/v1/deviceToken/refresh`，见 `qwenwork-auth.ts`）——
+   * 也就是说「这个号本来救得回来」，却让用户看到一条 401。
+   *
+   * 缓解项（定时器自愈 / 积分自愈 / 面板「刷新」按钮）确实能补，
+   * 但它们都**不在推理路径上**：用户发消息那一刻撞到过期令牌，
+   * 只能等下一轮定时器，或者自己回面板点一下。
+   *
+   * ## 调用时机
+   *
+   * 在 `stream()` 遍历槽**之前**、且仅当「当前槽的凭据看起来已过期 /
+   * 该槽在本次循环里首次撞到 `auth` 失败」时调一次 —— 见 `stream()` 里的注释。
+   *
+   * ⚠️ 必须**可选**（`?`）：`probeById` 的探针适配器与单测替身不实现它，
+   * 缺省时行为与改动前逐字节相同（本功能的唯一回归面）。
+   */
+  readonly refresh?: () => Promise<void>
   /** 诊断日志。 */
   readonly warn?: (message: string) => void
 }
@@ -317,6 +343,26 @@ export class QwenworkAdapter extends LlmAdapter {
         product: this.product,
         loadCatalog: async () => await this.loadCatalogEntries(),
         syncCatalog: () => this.syncCatalogEntries(),
+        /**
+         * ★ **强制重拉**（2026-11-23 审计 P3 补）。
+         *
+         * ⚠️ 不给这一项时骨架**根本不产出 `refresh()` 成员**
+         * （`model-catalog.ts:865` 用 `...config.refresh === undefined ? {} : {...}`），
+         * 于是 20 分钟后台目录刷新器对本家 `undefined` 跳过
+         * ⇒ 本家不在统一刷新里，只能靠自建的 10 分钟 TTL 被动等。
+         *
+         * ⚠️ 同时它**顺带修好 `listAllModels()` 的时效性**：
+         * 骨架的 `refresh()` 会把 `cached` 一起更新（`:873-878`），
+         * 而 `listAllModels()` 用的 `syncCatalog()` 在 `cached` 有值时读它
+         * ⇒ 刷新之后 `provider.status` 的 `models.total` 不再是旧值。
+         *
+         * 实现就是把自建缓存的 TTL 清零（`at: 0`），下次 `loadCatalogEntries`
+         * 必然真的打一次上游。**不在这里直接发请求**：那会和单飞逻辑抢，
+         * 且刷新器的语义是「标记失效、由下一次读触发」。
+         */
+        refresh: async () => {
+          this.remoteCatalog = undefined
+        },
         // ⚠️ 未知 id **保守报 `['text']`**：把「未知」当成「支持」会让 DSH 把图片
         //    投影成上游不接受的形态（`glm-5.3` 实测 400）。
         unknownModelInputModalities: () => ['text'] as const,
@@ -421,10 +467,31 @@ export class QwenworkAdapter extends LlmAdapter {
    * 而徽标只在 `listModels` 的 `LlmModelInfo.badge` 上有渲染位置。
    */
   listAllModels(): readonly { id: string; name: string }[] {
-    return fallbackEntries().map((m) => {
-      const entry = toCatalogEntry(m)
-      return { id: entry.id, name: entry.name }
-    })
+    /**
+     * ⚠️⚠️ **委托共享骨架**（2026-11-23 审计 P3 修，与 trae / qiniu 同款）。
+     *
+     * ## 原实现的问题（真实缺陷）
+     *
+     * 原先这里是 `fallbackEntries().map(...)` —— **恒读静态兜底表**。
+     * 后果：上游 `/api/chat-modes` 新增模型后，
+     * `provider.status` 的 `models.total` 与「关闭整个 provider」写黑名单用的
+     * 全量目录**仍是旧的 11 条**（那个矛盾态正是 `index.ts:6697` 注释要防的）。
+     * 当时静态表恰好与远端一致（11 条），所以**尚未显形** —— 属于「定时炸弹」。
+     *
+     * ## 为什么委托就对
+     *
+     * 骨架的 `listAllModels()`（`model-catalog.ts:556`）读的是**它自己的 `cached`**：
+     * - 未调用过 `listModels` 时回落 `syncCatalog()` ⇒ 仍是兜底表（冷启动，正确）；
+     * - 调过一次之后就用远端结果；
+     * - 且 `refresh()` 会同步更新 `cached`（`:873-878`）。
+     *
+     * 这样「远端优先」这条在**三个出口**上一致：
+     * `listModels`（选择器）/ `resolveModel`（单模型）/ `listAllModels`（全量）。
+     *
+     * ⚠️ 保留 `id` + `name` 的形状裁剪：骨架还多一个 `isFree`，
+     * 而本家**没有**免费模型（`price_factor` 最低 0.1、无 0 值）⇒ 不传。
+     */
+    return this.skeletonCatalog.listAllModels().map((m) => ({ id: m.id, name: m.name }))
   }
 
   /**
@@ -557,6 +624,14 @@ export class QwenworkAdapter extends LlmAdapter {
     }
 
     const tried = new Set<string>()
+    /**
+     * 已经**尝试过续期**的槽（每个槽只试一次）。
+     *
+     * ⚠️ 与 `tried` **分开**：`tried` 是「不再选这个号」，
+     * 而续期成功的号**要能再次被选中**（否则续了也白续）。
+     * 故两个集合的语义相反 —— 合并会让续期这条腿彻底失效。
+     */
+    const refreshed = new Set<string>()
     const limited: string[] = []
 
     for (;;) {
@@ -611,6 +686,33 @@ export class QwenworkAdapter extends LlmAdapter {
           // 认证失败：**标记并切下一个账号是对的，但不写限流标记**。
           // 也不能在试完全部槽后报「所有账号均受限」—— 真实原因通常是
           // 「这枚 token 失效」，与额度无关 ⇒ 最后一次失败**直接透传原文**。
+          /**
+           * ⚠️⚠️ **先尝试续期，再换号**（2026-11-23 审计 P2 补）。
+           *
+           * 本家**有**真实 refresh 端点 ⇒ 「这个号救得回来」。
+           * 漏了这条腿的后果：令牌一过期，用户就看到 401，
+           * 而定时器/积分自愈都不在推理路径上 ⇒ 只能干等或回面板手点。
+           *
+           * ⚠️ **每个槽只试一次**（`refreshed` 集合去重）：refresh 是**账号级**
+           * 副作用（会轮换 refresh_token 并落盘），在循环里反复调既浪费又可能
+           * 把刚续好的凭据再轮换一次。
+           *
+           * ⚠️ 续期失败**不吞异常**（`catch` 里只记日志）—— 它不该掩盖真正的
+           * 认证错误，也不该因为「续期这条路也失败了」就变成另一条错误链。
+           */
+          if (this.options.refresh !== undefined && !refreshed.has(slot.id)) {
+            refreshed.add(slot.id)
+            try {
+              await this.options.refresh()
+              this.options.warn?.(`qwenworkintl: 账号 ${slot.id} 认证失败，已尝试续期后重试`)
+              // ⚠️ 续期后**不排除该槽**：重新 resolve 时会拿到新凭据。
+              continue
+            } catch (refreshError) {
+              this.options.warn?.(
+                `qwenworkintl: 账号 ${slot.id} 续期失败：${String(refreshError)}`,
+              )
+            }
+          }
           if (tried.size >= slots.length) throw error
           limited.push(`${slot.id}(认证失败)`)
           continue
