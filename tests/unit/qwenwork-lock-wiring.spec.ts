@@ -24,7 +24,7 @@
  * ⚠️ 第 2 层用**带上下文的锚点**而不是裸符号：`drives` 里只写 `qwenworkLockedError`
  * 对 `src/index.ts` 无牙（符号定义还在文件里，删掉使用点照样 `includes` 为真）。
  */
-import { readFileSync } from 'node:fs'
+import { readdirSync, readFileSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
@@ -1230,4 +1230,38 @@ describe('★★★ 二轮审计的 8 个 🟡/⚪（行为级）', () => {
       /credential\.machine_id === undefined[\s\S]{0,80}?machine_id: credential\.machine_id/,
     )
   })
+
+  /**
+   * ## G-8 🟡B-9 `setToken` 的**缺口登记必须留着**
+   *
+   * 后端 `qwenworkintl.setToken` / `removeAccount` 已分派，
+   * 但 `plugin-src/client/` 对 `setToken` **零命中** ⇒ 界面上没有
+   * 「手工粘贴 token」的入口。
+   *
+   * 本轮**刻意不补 UI**（客户端弹窗是本仓白屏事故最高发区，而主路径
+   * 设备码登录工作正常），但**必须在源码里留一段可检索的登记** ——
+   * 否则下一个人会以为「已经接了 UI」而不再去查。
+   *
+   * ⚠️ 这条守卫守的是**说明的存在**，不是功能的正确性 ——
+   * 将来真补了 UI，把它改成正向断言即可。
+   */
+  it('★★ G-8 setToken 缺口登记必须留着（或已补 UI）', () => {
+    const rpcSource = readFileSync(resolve(here, '../../src/qwenwork-rpc.ts'), 'utf8')
+    const clientDir = resolve(here, '../../plugin-src/client')
+    const clientHasEntry = readdirSync(clientDir)
+      .filter((f) => f.endsWith('.js'))
+      .some((f) => readFileSync(resolve(clientDir, f), 'utf8').includes('setToken'))
+    if (clientHasEntry) {
+      // 已补 UI ⇒ 不再需要缺口登记（这条守卫的正向分支）。
+      return
+    }
+    expect(
+      rpcSource.includes('已知缺口登记：`setToken` 没有客户端入口'),
+      '要么补 UI，要么留着缺口登记 —— 两者都没有会让后人以为已接',
+    ).toBe(true)
+    // ⚠️ 登记里必须写清「为什么这次不补」和「什么时候该补」。
+    expect(rpcSource).toMatch(/什么时候该补/)
+    expect(rpcSource).toMatch(/hook #310/)
+  })
+
 })
