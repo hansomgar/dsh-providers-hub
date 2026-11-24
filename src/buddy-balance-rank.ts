@@ -541,10 +541,27 @@ export interface BuddyTierOptions {
    * | 值 | 行为 |
    * |---|---|
    * | `'imminent'` / `'expiring'` / `'permanent'` | 按 S6 判降档 |
-   * | **`undefined`** | **保持 S5**（起点绝对第一）—— 老数据 / 老客户端 |
+   * | **`undefined`** | **按「档位已变」处理 ⇒ 交出首位**（**不是**保持 S5） |
    *
-   * ⚠️ `undefined` 走 S5 是刻意的向后兼容：升级前选的起点没有这个快照，
-   *    静默改变其行为违反本仓纪律。用户重选一次起点即启用 S6。
+   * ⚠️⚠️ **本表此前写反了**（2026-11-24 修正，上游 PR #148 的 P3-3 指出）：
+   * 旧文写「`undefined` ⇒ **保持 S5**（起点绝对第一）……这是刻意的向后兼容」，
+   * 而 `rotateFromPreferred` 的实现是：
+   *
+   * ```ts
+   * const tierStillHeld = tierAtSelection !== undefined && tierNow === tierAtSelection
+   * //                     ^^^^^^^^^^^^^^^^^^^^^^^^^^ undefined ⇒ false ⇒ 交出首位
+   * ```
+   *
+   * 配套的 `rotateFromPreferred` 文档（本文件 L761 起）写的是
+   * 「**2026-11-20 二改：不再有「无快照回落 S5」**」——
+   * 两个位置**互相矛盾**，而实现站在「二改」那边。
+   *
+   * ⚠️ 后果：谁照这条注释改代码，就会把「`undefined` 回落 S5」这个**已被
+   * 明确移除**的语义写回来，等于复原缺陷。故必须按实现订正。
+   *
+   * ⚠️ 老数据**不会**因此被静默改变行为：`sanitizePreferredRotation`
+   * 会**丢弃**一切无档位的条目（那是 2026-11-20 二改的另一半），
+   * 所以「有起点 ⇒ 必有档位」在存储层就成立。
    */
   rotationStartTier?: RotationStartTier
   /**
