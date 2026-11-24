@@ -99,7 +99,7 @@ gh pr create --repo iJetLi/dsh-providers-hub --base master --head hansomgar:fix/
 **提 PR 前必跑的自检**（脚本见 §六）：
 
 ```bash
-node scripts/check-no-private.mjs            # 当前分支
+node tools/check-no-private.mjs            # 当前分支
 ```
 
 ### 规则 2：私有开发在 `feat/qwenwork-intl-provider` 上
@@ -180,7 +180,7 @@ npx tsc --noEmit        # 应通过
 
 ## 六、驻场脚本
 
-### 6.1 `scripts/check-no-private.mjs` —— 提 PR 前的自检
+### 6.1 `tools/check-no-private.mjs` —— 提 PR 前的自检
 
 判据（任一命中即拒绝）：
 
@@ -192,11 +192,24 @@ npx tsc --noEmit        # 应通过
 
 ### 6.2 用法
 
+⚠️⚠️ **脚本本身住在私有分支上，PR worktree 里没有它** —— 这是刻意的：
+它引用了本方案（私有工作流），不该进上游。
+
+**正确用法：从 PR worktree 用相对路径调主目录的脚本。**
+
 ```bash
-# 在某 feature 分支上
-node scripts/check-no-private.mjs            # 检查 origin/master...HEAD
-node scripts/check-no-private.mjs --staged   # 只查暂存区
+# 在 PR worktree（../dsh-providers-hub-pr）里：
+node ../dsh-providers-hub/tools/check-no-private.mjs
+
+# 或从主目录（私有分支）看报告（加 --allow-private 只看不拦）：
+node tools/check-no-private.mjs --allow-private
 ```
+
+**为什么跨目录调用能成立**：`git` 命令按 **cwd** 定位仓库，
+而 worktree 是**独立的工作区**（有自己的 HEAD / index）。
+⇒ 脚本文件从主目录读，但 `git diff` 在 PR worktree 上执行 ⇒ 检查的正是 PR 的内容。
+
+⚠️ 所以**绝不能** `cd` 到主目录再跑想检查 PR —— 那查的是私有分支（必然命中）。
 
 ### 6.3 建议挂到 pre-push（可选）
 
@@ -209,7 +222,7 @@ branch=$(git rev-parse --abbrev-ref HEAD)
 case "$branch" in
   feat/qwenwork-intl-provider) exit 0 ;;
 esac
-node scripts/check-no-private.mjs || exit 1
+node tools/check-no-private.mjs || exit 1
 ```
 
 ---
