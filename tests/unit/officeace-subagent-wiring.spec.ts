@@ -238,4 +238,138 @@ describe('★★★ officeace 接线：用共享函数决定「遍历顺序」',
       '没注入 subagentPool ⇒ 生产恒 undefined ⇒ officeace 的子代理设置仍然无效',
     ).toMatch(/createOfficeAceCredentialProvider\(\{[\s\S]{0,2500}?subagentPool:\s*pool/)
   })
+
+  /**
+   * ## O4b（行为级）缺失 `subagentPool` ⇒ **原路返回**（不重排）
+   *
+   * ⚠️ 上游在 PR #168 合并时点名：
+   *
+   * > 「**P0-B 只有源码文本守卫**（`toContain`），非行为级」
+   *
+   * 源码正则挡不住 `if (false && pool === undefined)` 这类死分支形态
+   *（上游在 PR #158 实测过：`if (false && codeartsIsSubagent)` ⇒ 116 条全绿）。
+   *
+   * ## 判据
+   *
+   * 池 `[oa1, oa2, oa3]`、`sequence` 策略，**但不传 `subagentPool`**：
+   *
+   * | 实现 | 首位 |
+   * |---|---|
+   * | 正确（无 pool ⇒ 原路返回）| **`oa1`**（池首）|
+   * | 错误（无 pool 也去算起点）| `oa2`（`sequence` 错开一位）|
+   *
+   * ⇒ 两者可分辨。
+   */
+  it('★★★ O4b（行为级）无 subagentPool ⇒ 首位保持池首（原路返回）', async () => {
+    const { createOfficeAceCredentialProvider } = await import('../../src/officeace-lock.js')
+
+    const POOL4 = [
+      { id: 'oa1', credentialRef: 'R-oa1' },
+      { id: 'oa2', credentialRef: 'R-oa2' },
+      { id: 'oa3', credentialRef: 'R-oa3' },
+    ]
+    const visits: string[] = []
+
+    const provider = createOfficeAceCredentialProvider({
+      permanentLocked: () => true,
+      accounts: () => POOL4,
+      resolveUnlocked: async () => undefined,
+      readCredential: async (ref: string) => {
+        visits.push(ref)
+        /** ⚠️ 全部成功 ⇒ 首个即返回 ⇒ 首位 = 遍历顺序首位。 */
+        return { basicAuthorization: 'x' } as never
+      },
+      readStoredCredential: () => undefined,
+      summaryOf: async () => ({
+        ok: true as const,
+        /**
+         * ⚠️ 必须有「近期到期」的桶：
+         * 无到期日会归 permanent ⇒ 锁定态判「没有可用账号」；
+         * 缺 `creditGroups` 数组 ⇒ `for…of` 直接抛。
+         */
+        summary: {
+          creditGroups: [{
+            remaining: 100,
+            expired: false,
+            expiresAt: new Date(Date.now() + 86_400_000).toISOString(),
+          }],
+        } as never,
+      }),
+      /** ⚠️ **刻意不传 `subagentPool`** —— 本用例的全部意义。 */
+    } as never)
+
+    await provider('child-1')
+    console.log('  [O4b] 无 pool ⇒ 首位:', visits[0])
+    expect(
+      visits[0],
+      '★★★ 无 subagentPool ⇒ 必须原路返回（首位 = 池首 oa1）。'
+        + '若得 oa2 = 「无 pool 也去算起点」⇒ 零回归被破坏',
+    ).toBe('R-oa1')
+  })
+
+  /**
+   * ## O5b（行为级）判据抛异常 ⇒ **原路返回**（选号不能因它失败）
+   *
+   * 上游点名的同一个问题（「P0-B 只有源码文本守卫」）。
+   *
+   * ## 怎么制造异常
+   *
+   * 让 `subagentPool.subagentRotationFor` **抛错** —— 它在
+   * `orderAccountsForSubagent` 的 `try` 块**内部**被调用。
+   *
+   * | 实现 | 结果 |
+   * |---|---|
+   * | 正确（catch 返回 accounts）| 首位 `oa1`，**不抛** |
+   * | 错误（没有 catch）| `provider()` **直接抛** ⇒ 整个渠道不可用 |
+   *
+   * ⚠️ 这条守的是**安全性**：每发请求都走选号，一次判据异常不该让渠道瘫掉。
+   */
+  it('★★★ O5b（行为级）判据抛异常 ⇒ 原路返回、不抛（选号不能因它失败）', async () => {
+    const { createOfficeAceCredentialProvider } = await import('../../src/officeace-lock.js')
+
+    const POOL5 = [
+      { id: 'oa1', credentialRef: 'R-oa1' },
+      { id: 'oa2', credentialRef: 'R-oa2' },
+    ]
+    const visits: string[] = []
+
+    const provider = createOfficeAceCredentialProvider({
+      permanentLocked: () => true,
+      accounts: () => POOL5,
+      resolveUnlocked: async () => undefined,
+      readCredential: async (ref: string) => {
+        visits.push(ref)
+        return { basicAuthorization: 'x' } as never
+      },
+      readStoredCredential: () => undefined,
+      summaryOf: async () => ({
+        ok: true as const,
+        summary: {
+          creditGroups: [{
+            remaining: 100,
+            expired: false,
+            expiresAt: new Date(Date.now() + 86_400_000).toISOString(),
+          }],
+        } as never,
+      }),
+      subagentPool: {
+        /** ⚠️ 分配记录齐全 ⇒ 会进 try 块。 */
+        subagentAssignmentOf: (_p: string, sid: string) =>
+          (sid === 'child-1' ? { parentSessionId: 'main-1' } : undefined),
+        /** ★★ **在这里抛** —— 模拟判据异常。 */
+        subagentRotationFor: () => { throw new Error('boom-判据异常') },
+        listAccountsByProvider: () => POOL5.map((a) => ({ id: a.id, enabled: true })),
+        permanentLocked: () => true,
+      },
+    } as never)
+
+    /**
+     * ⚠️ **必须 `resolves` 而不是 `rejects`**：没有 catch 时这里会抛，
+     *   而 `expect(...).resolves` 会把「抛」变成失败 ⇒ 判据成立。
+     */
+    await expect(provider('child-1'), '★★★ 判据异常必须被吞掉（否则整个渠道不可用）')
+      .resolves.toBeDefined()
+    console.log('  [O5b] 异常后首位:', visits[0])
+    expect(visits[0], '★★ 异常时原路返回 ⇒ 首位 = 池首 oa1').toBe('R-oa1')
+  })
 })
